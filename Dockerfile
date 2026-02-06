@@ -104,6 +104,9 @@ COPY --from=builder /usr/src/contra/target/release/activity /usr/local/bin/activ
 COPY --from=builder /usr/src/contra/target/release/gateway /usr/local/bin/gateway
 COPY --from=builder /usr/src/contra/target/release/indexer /usr/local/bin/indexer
 
+# Copy indexer/operator config files
+COPY indexer/config /etc/contra/config
+
 # Create data directory for RocksDB
 RUN mkdir -p /data && chown contra:contra /data
 
