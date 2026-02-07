@@ -19,7 +19,7 @@ max_connections = 10
 datasource_type = "yellowstone"
 
 [indexer.yellowstone]
-endpoint = "https://placeholder-set-via-env"
+endpoint = "http://placeholder-set-via-env"
 commitment = "confirmed"
 
 [indexer.rpc_polling]
