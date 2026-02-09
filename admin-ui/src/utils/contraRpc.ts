@@ -2,7 +2,8 @@ import { createSolanaRpc } from '@solana/rpc';
 
 function normalizeUrl(raw: string, fallback: string): string {
   const url = raw || fallback;
-  if (url.startsWith('http://') || url.startsWith('https://')) return url;
+  // Relative paths (e.g. /contra-read from vite proxy) are valid as-is
+  if (url.startsWith('/') || url.startsWith('http://') || url.startsWith('https://')) return url;
   return `https://${url}`;
 }
 
