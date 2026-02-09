@@ -8,7 +8,7 @@ import { useWalletAccountTransactionSendingSigner } from '@solana/react';
 import type { UiWalletAccount } from '@wallet-standard/react';
 import { getBase58Decoder } from '@solana/codecs-strings';
 import { createSolanaRpc } from '@solana/rpc';
-import { CONTRA_READ_URL, CONTRA_WRITE_URL } from '../utils/contraRpc';
+import { CONTRA_READ_URL } from '../utils/contraRpc';
 import {
   findAssociatedTokenPda,
   getCreateAssociatedTokenIdempotentInstruction,

@@ -79,7 +79,7 @@ function computeStats(txs: ActivityTransaction[]): ActivityStats {
   };
 }
 
-export function useActivityFeed(instancePubkey: string | null, solanaEndpoint: string) {
+export function useActivityFeed(instancePubkey: string | null, _solanaEndpoint?: string) {
   const { rpc: solanaRpc } = useSolana();
   const [transactions, setTransactions] = useState<ActivityTransaction[]>([]);
   const [stats, setStats] = useState<ActivityStats>(computeStats([]));
@@ -107,11 +107,10 @@ export function useActivityFeed(instancePubkey: string | null, solanaEndpoint: s
     if (!instancePubkey) return;
 
     try {
+      const sigOpts: { limit: number; until?: string } = { limit: 25 };
+      if (lastSolanaSig.current) sigOpts.until = lastSolanaSig.current;
       const result = await solanaRpc
-        .getSignaturesForAddress(address(instancePubkey), {
-          limit: 25,
-          ...(lastSolanaSig.current ? { until: lastSolanaSig.current } : {}),
-        })
+        .getSignaturesForAddress(address(instancePubkey), sigOpts)
         .send();
 
       if (!result || result.length === 0) return;
@@ -203,11 +202,10 @@ export function useActivityFeed(instancePubkey: string | null, solanaEndpoint: s
       const contraRpc = createSolanaRpc(CONTRA_READ_URL);
 
       // Poll recent signatures for the instance address on Contra
+      const contraSigOpts: { limit: number; until?: string } = { limit: 25 };
+      if (lastContraSig.current) contraSigOpts.until = lastContraSig.current;
       const result = await contraRpc
-        .getSignaturesForAddress(address(instancePubkey), {
-          limit: 25,
-          ...(lastContraSig.current ? { until: lastContraSig.current } : {}),
-        })
+        .getSignaturesForAddress(address(instancePubkey), contraSigOpts)
         .send();
 
       if (!result || result.length === 0) return;

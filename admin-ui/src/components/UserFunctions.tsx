@@ -10,7 +10,7 @@ import type { UiWalletAccount } from '@wallet-standard/react';
 import { getBase58Decoder } from '@solana/codecs-strings';
 import { getDepositInstructionAsync } from '@contra-escrow';
 import { getWithdrawFundsInstructionAsync } from '@contra-withdraw';
-import { CONTRA_READ_URL, CONTRA_WRITE_URL } from '../utils/contraRpc';
+import { CONTRA_READ_URL } from '../utils/contraRpc';
 import { createSolanaRpc } from '@solana/rpc';
 import {
   pipe,
@@ -211,9 +211,8 @@ function WithdrawSection({
       const amount = BigInt(withdrawAmount);
       const destination = withdrawDestination ? address(withdrawDestination) : null;
 
-      // Read blockhash from Contra read endpoint, send tx to write endpoint
+      // Read blockhash from Contra read endpoint
       const contraReadRpcClient = createSolanaRpc(CONTRA_READ_URL);
-      const contraWriteRpcClient = createSolanaRpc(CONTRA_WRITE_URL);
 
       // Get the withdraw instruction
       const instruction = await getWithdrawFundsInstructionAsync({
