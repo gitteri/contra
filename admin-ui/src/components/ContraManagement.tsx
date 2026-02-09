@@ -7,6 +7,7 @@ import type { UiWalletAccount } from "@wallet-standard/react";
 import { getBase58Decoder } from "@solana/codecs-strings";
 import { getWithdrawFundsInstructionAsync } from "@contra-withdraw";
 import { createSolanaRpc } from "@solana/rpc";
+import { CONTRA_READ_URL, CONTRA_WRITE_URL } from "../utils/contraRpc";
 import {
   findAssociatedTokenPda,
   getCreateAssociatedTokenIdempotentInstruction,
@@ -22,12 +23,6 @@ import {
   assertIsTransactionMessageWithSingleSendingSigner,
 } from "@solana/kit";
 
-const rawUrl =
-  import.meta.env.VITE_CONTRA_RPC_URL || "https://api.onlyoncontra.xyz";
-const CONTRA_RPC_URL =
-  rawUrl.startsWith("http://") || rawUrl.startsWith("https://")
-    ? rawUrl
-    : `https://${rawUrl}`;
 const TOKEN_PROGRAM_ADDRESS =
   "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" as const;
 
@@ -74,8 +69,8 @@ function WithdrawSection({
         ? address(withdrawDestination)
         : null;
 
-      // Create RPC connection to Contra for the withdrawal transaction
-      const contraRpc = createSolanaRpc(CONTRA_RPC_URL);
+      // Read from Contra read endpoint, send to write endpoint
+      const contraRead = createSolanaRpc(CONTRA_READ_URL);
 
       // Get the withdraw instruction
       const instruction = await getWithdrawFundsInstructionAsync({
@@ -88,7 +83,7 @@ function WithdrawSection({
       console.log("Created withdraw instruction:", instruction);
 
       // Get recent blockhash from Contra
-      const { value: latestBlockhash } = await contraRpc
+      const { value: latestBlockhash } = await contraRead
         .getLatestBlockhash({ commitment: "confirmed" })
         .send();
 
@@ -220,8 +215,8 @@ function TransferSection({
       const amount = BigInt(transferAmount);
       const recipient = address(recipientAddress);
 
-      // Create RPC connection to Contra for the transfer transaction
-      const contraRpc = createSolanaRpc(CONTRA_RPC_URL);
+      // Read from Contra read endpoint, send to write endpoint
+      const contraRead = createSolanaRpc(CONTRA_READ_URL);
 
       // Find the source ATA (user's token account)
       const [sourceAta] = await findAssociatedTokenPda({
@@ -251,13 +246,13 @@ function TransferSection({
       console.log("Created transfer instruction:", transferInstruction);
 
       // Get recent blockhash from Contra
-      const { value: latestBlockhash } = await contraRpc
+      const { value: latestBlockhash } = await contraRead
         .getLatestBlockhash({ commitment: "confirmed" })
         .send();
 
       // Build transaction message
 
-      const destinationAtaInfo = await contraRpc
+      const destinationAtaInfo = await contraRead
         .getAccountInfo(destinationAta, { encoding: "base64" })
         .send();
 
@@ -399,8 +394,8 @@ export function ContraManagement() {
       setError("");
       setContraBalance(null);
 
-      // Create RPC connection to Contra
-      const contraRpc = createSolanaRpc(CONTRA_RPC_URL);
+      // Read balance from Contra read endpoint
+      const contraRead = createSolanaRpc(CONTRA_READ_URL);
 
       // Find the associated token account for the user on Contra
       const [ata] = await findAssociatedTokenPda({
@@ -412,7 +407,7 @@ export function ContraManagement() {
       console.log("Fetching balance from Contra for ATA:", ata);
 
       // Fetch the token account balance (includes decimals!)
-      const tokenAccountBalance = await contraRpc
+      const tokenAccountBalance = await contraRead
         .getTokenAccountBalance(ata)
         .send();
 
@@ -466,7 +461,7 @@ export function ContraManagement() {
         to mainnet
       </p>
       <p className="info-text">
-        Connected to Contra RPC: {CONTRA_RPC_URL}
+        Contra Read: {CONTRA_READ_URL} | Write: {CONTRA_WRITE_URL}
       </p>
 
       {error && <div className="error-message">{error}</div>}

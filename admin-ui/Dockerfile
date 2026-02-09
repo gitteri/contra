@@ -27,8 +27,10 @@ RUN pnpm install --frozen-lockfile
 RUN ln -s /app/admin-ui/node_modules /app/contra-escrow-program/clients/typescript/node_modules && \
     ln -s /app/admin-ui/node_modules /app/contra-withdraw-program/clients/typescript/node_modules
 
-ARG CONTRA_RPC_URL
-ENV CONTRA_RPC_URL=${CONTRA_RPC_URL}
+ARG CONTRA_READ_URL
+ARG CONTRA_WRITE_URL
+ENV CONTRA_READ_URL=${CONTRA_READ_URL}
+ENV CONTRA_WRITE_URL=${CONTRA_WRITE_URL}
 RUN pnpm build
 
 # Serve with a lightweight static server

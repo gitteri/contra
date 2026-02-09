@@ -18,7 +18,14 @@ export default defineConfig(({ mode }) => {
       global: 'globalThis',
       'process.env': {},
       'process.env.NODE_ENV': JSON.stringify(process.env.NODE_ENV || 'development'),
-      'import.meta.env.VITE_CONTRA_RPC_URL': JSON.stringify(env.CONTRA_RPC_URL || 'https://api.onlyoncontra.xyz'),
+      // Split read/write endpoints for Contra chain.
+      // Falls back to the single CONTRA_RPC_URL if split vars aren't set.
+      'import.meta.env.VITE_CONTRA_READ_URL': JSON.stringify(
+        env.CONTRA_READ_URL || env.CONTRA_RPC_URL || 'https://read.onlyoncontra.xyz'
+      ),
+      'import.meta.env.VITE_CONTRA_WRITE_URL': JSON.stringify(
+        env.CONTRA_WRITE_URL || env.CONTRA_RPC_URL || 'https://write.onlyoncontra.xyz'
+      ),
     },
   }
 })

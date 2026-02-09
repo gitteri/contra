@@ -8,23 +8,32 @@ import { UserFunctions } from "./components/UserFunctions";
 import { StatusChecker } from "./components/StatusChecker";
 import { MintManager } from "./components/MintManager";
 import { ContraManagement } from "./components/ContraManagement";
+import { ActivityFeed } from "./components/ActivityFeed";
+import { ActivityStats } from "./components/ActivityStats";
+import { PayoutManager } from "./components/PayoutManager";
 import { useWallet } from "./hooks/useWallet";
 import { useCluster } from "./hooks/useCluster";
 import { useLocalStorage } from "./hooks/useLocalStorage";
+import { useActivityFeed } from "./hooks/useActivityFeed";
 import type { NetworkType } from "./context/ClusterContext";
 import { createSolanaRpc } from "@solana/rpc";
 import { createSolanaRpcSubscriptions } from "@solana/rpc-subscriptions";
 import { SolanaContext } from "./context/SolanaContext";
 
-type TabType = "escrow" | "mint" | "contra";
+type TabType = "escrow" | "mint" | "contra" | "activity" | "payout";
 type EscrowSection = "admin" | "operator" | "user" | "status";
 
 function AppContent() {
   const { connected, publicKey } = useWallet();
-  const { network, setNetwork } = useCluster();
+  const { network, setNetwork, endpoint } = useCluster();
   const [instancePubkey, setInstancePubkey] = useState<string>("");
   const [activeTab, setActiveTab] = useLocalStorage<TabType>("activeTab", "escrow");
   const [escrowSection, setEscrowSection] = useLocalStorage<EscrowSection>("escrowSection", "admin");
+
+  const { transactions, stats, isPolling, start, stop } = useActivityFeed(
+    instancePubkey || null,
+    endpoint
+  );
 
   return (
     <div className="app-container">
@@ -66,6 +75,19 @@ function AppContent() {
                 Escrow
               </button>
               <button
+                className={`tab ${activeTab === "activity" ? "active" : ""}`}
+                onClick={() => setActiveTab("activity")}
+              >
+                Activity
+                {isPolling && <span className="tab-polling-dot" />}
+              </button>
+              <button
+                className={`tab ${activeTab === "payout" ? "active" : ""}`}
+                onClick={() => setActiveTab("payout")}
+              >
+                Payout
+              </button>
+              <button
                 className={`tab ${activeTab === "mint" ? "active" : ""}`}
                 onClick={() => setActiveTab("mint")}
               >
@@ -80,6 +102,7 @@ function AppContent() {
             </div>
 
             <div className="tab-content">
+              {/* Escrow tab */}
               <div
                 style={{ display: activeTab === "escrow" ? "block" : "none" }}
               >
@@ -136,10 +159,33 @@ function AppContent() {
                 )}
               </div>
 
+              {/* Activity tab */}
+              <div
+                style={{ display: activeTab === "activity" ? "block" : "none" }}
+              >
+                <ActivityStats
+                  stats={stats}
+                  isPolling={isPolling}
+                  onStart={start}
+                  onStop={stop}
+                  instancePubkey={instancePubkey || null}
+                />
+                <ActivityFeed transactions={transactions} />
+              </div>
+
+              {/* Payout tab */}
+              <div
+                style={{ display: activeTab === "payout" ? "block" : "none" }}
+              >
+                <PayoutManager />
+              </div>
+
+              {/* Mint tab */}
               <div style={{ display: activeTab === "mint" ? "block" : "none" }}>
                 <MintManager />
               </div>
 
+              {/* Contra tab */}
               <div
                 style={{ display: activeTab === "contra" ? "block" : "none" }}
               >

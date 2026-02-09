@@ -10,6 +10,7 @@ import type { UiWalletAccount } from '@wallet-standard/react';
 import { getBase58Decoder } from '@solana/codecs-strings';
 import { getDepositInstructionAsync } from '@contra-escrow';
 import { getWithdrawFundsInstructionAsync } from '@contra-withdraw';
+import { CONTRA_READ_URL, CONTRA_WRITE_URL } from '../utils/contraRpc';
 import { createSolanaRpc } from '@solana/rpc';
 import {
   pipe,
@@ -21,8 +22,8 @@ import {
   assertIsTransactionMessageWithSingleSendingSigner,
 } from '@solana/kit';
 
-const rawUrl = import.meta.env.VITE_CONTRA_RPC_URL || 'https://api.onlyoncontra.xyz';
-const CONTRA_RPC_URL = rawUrl.startsWith('http://') || rawUrl.startsWith('https://') ? rawUrl : `https://${rawUrl}`;
+// Contra read endpoint for blockhash, write for sendTransaction
+// (imported from utils/contraRpc)
 
 interface UserFunctionsProps {
   instancePubkey: string;
@@ -210,8 +211,9 @@ function WithdrawSection({
       const amount = BigInt(withdrawAmount);
       const destination = withdrawDestination ? address(withdrawDestination) : null;
 
-      // Create RPC connection to Contra for the withdrawal transaction
-      const contraRpc = createSolanaRpc(CONTRA_RPC_URL);
+      // Read blockhash from Contra read endpoint, send tx to write endpoint
+      const contraReadRpcClient = createSolanaRpc(CONTRA_READ_URL);
+      const contraWriteRpcClient = createSolanaRpc(CONTRA_WRITE_URL);
 
       // Get the withdraw instruction
       const instruction = await getWithdrawFundsInstructionAsync({
@@ -224,7 +226,7 @@ function WithdrawSection({
       console.log('Created withdraw instruction:', instruction);
 
       // Get recent blockhash from Contra
-      const { value: latestBlockhash } = await contraRpc.getLatestBlockhash({ commitment: 'confirmed' }).send();
+      const { value: latestBlockhash } = await contraReadRpcClient.getLatestBlockhash({ commitment: 'confirmed' }).send();
 
       // Build transaction message
       const transactionMessage = pipe(

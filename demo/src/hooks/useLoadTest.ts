@@ -18,8 +18,8 @@ import {
   getTokenBalance,
 } from "../utils/solana";
 
-const WRITE_URL = import.meta.env.VITE_WRITE_URL || "http://localhost:8899";
-const READ_URL = import.meta.env.VITE_READ_URL || "http://localhost:8899";
+const WRITE_URL = "/api/write";
+const READ_URL = "/api/read";
 const INITIAL_BALANCE = 1000000000; // 1000 tokens with 6 decimals
 
 export const useLoadTest = () => {
@@ -138,7 +138,8 @@ export const useLoadTest = () => {
         const { signature, latency } = await sendTransaction(
           transaction,
           [sender],
-          WRITE_URL
+          WRITE_URL,
+          READ_URL
         );
 
         // Update transaction with signature
@@ -307,7 +308,7 @@ export const useLoadTest = () => {
 
     console.log("Initializing mint...");
     const mintTx = createMintTransaction(admin, mint);
-    await sendTransaction(mintTx, [admin], WRITE_URL);
+    await sendTransaction(mintTx, [admin], WRITE_URL, READ_URL);
 
     // Create ATAs
     console.log("Creating token accounts...");
@@ -317,14 +318,14 @@ export const useLoadTest = () => {
         senderKeypairs[i].publicKey,
         mint
       );
-      await sendTransaction(senderATA, [senderKeypairs[i]], WRITE_URL);
+      await sendTransaction(senderATA, [senderKeypairs[i]], WRITE_URL, READ_URL);
 
       const receiverATA = await createATATransaction(
         senderKeypairs[i],
         receiverWallets[i].address,
         mint
       );
-      await sendTransaction(receiverATA, [senderKeypairs[i]], WRITE_URL);
+      await sendTransaction(receiverATA, [senderKeypairs[i]], WRITE_URL, READ_URL);
     }
 
     // Wait for ATAs to be created
@@ -340,7 +341,7 @@ export const useLoadTest = () => {
         ata,
         INITIAL_BALANCE
       );
-      await sendTransaction(mintToTx, [admin], WRITE_URL);
+      await sendTransaction(mintToTx, [admin], WRITE_URL, READ_URL);
     }
 
     // Update initial balances
