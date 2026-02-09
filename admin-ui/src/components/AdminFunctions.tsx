@@ -3,6 +3,7 @@ import { useSolana } from '../hooks/useSolana';
 import { useWallet } from '../hooks/useWallet';
 import { useWalletStandardAccount } from '../hooks/useWalletStandardAccount';
 import { useCluster } from '../hooks/useCluster';
+import { useLocalStorage, useRecentItems } from '../hooks/useLocalStorage';
 import { address } from '@solana/addresses';
 import { useWalletAccountTransactionSendingSigner } from '@solana/react';
 import { getBase58Decoder } from '@solana/codecs-strings';
@@ -63,14 +64,19 @@ function AdminFunctionsContent({ instancePubkey, account, network }: AdminFuncti
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState<string | null>(null);
-  const [mintAddress, setMintAddress] = useState('');
+  const [savedMint] = useLocalStorage<string>('lastMintAddress', '');
+  const [mintAddress, setMintAddress] = useState(savedMint);
   const [operatorAddress, setOperatorAddress] = useState('');
   const [newAdminAddress, setNewAdminAddress] = useState('');
   const [newMintDecimals, setNewMintDecimals] = useState(9);
   const [createdMintAddress, setCreatedMintAddress] = useState<string | null>(null);
+  const [recentMints, addRecentMint] = useRecentItems('recentMints', 5);
 
   const chainId = (network === 'localnet' ? 'solana:devnet' : `solana:${network}`) as `solana:${string}`;
   const transactionSigner = useWalletAccountTransactionSendingSigner(account, chainId);
+
+  const truncateAddress = (addr: string) =>
+    addr.length > 12 ? `${addr.slice(0, 6)}...${addr.slice(-4)}` : addr;
 
   const handleAllowMint = async () => {
     if (!mintAddress) {
@@ -117,6 +123,7 @@ function AdminFunctionsContent({ instancePubkey, account, network }: AdminFuncti
 
       console.log('Transaction sent with signature:', signature);
 
+      addRecentMint(mintAddress);
       setSuccess(`Mint allowed successfully! Signature: ${signature}`);
       setMintAddress('');
 
@@ -359,6 +366,7 @@ function AdminFunctionsContent({ instancePubkey, account, network }: AdminFuncti
       console.log('Mint created with signature:', signature);
 
       setCreatedMintAddress(mint.address);
+      addRecentMint(mint.address);
       setSuccess(`Mint created successfully! Signature: ${signature}`);
 
     } catch (err) {
@@ -394,6 +402,23 @@ function AdminFunctionsContent({ instancePubkey, account, network }: AdminFuncti
             placeholder="Enter token mint address"
             className="input"
           />
+          {recentMints.length > 0 && (
+            <div className="recent-items recent-items-inline">
+              <span className="recent-label">Recent mints</span>
+              <div className="recent-list">
+                {recentMints.map((addr) => (
+                  <button
+                    key={addr}
+                    className="recent-item"
+                    onClick={() => setMintAddress(addr)}
+                    title={addr}
+                  >
+                    <span className="recent-item-text">{truncateAddress(addr)}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
         <div className="button-group">
           <button

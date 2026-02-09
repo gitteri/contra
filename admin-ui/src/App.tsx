@@ -10,18 +10,21 @@ import { MintManager } from "./components/MintManager";
 import { ContraManagement } from "./components/ContraManagement";
 import { useWallet } from "./hooks/useWallet";
 import { useCluster } from "./hooks/useCluster";
+import { useLocalStorage } from "./hooks/useLocalStorage";
 import type { NetworkType } from "./context/ClusterContext";
 import { createSolanaRpc } from "@solana/rpc";
 import { createSolanaRpcSubscriptions } from "@solana/rpc-subscriptions";
 import { SolanaContext } from "./context/SolanaContext";
 
 type TabType = "escrow" | "mint" | "contra";
+type EscrowSection = "admin" | "operator" | "user" | "status";
 
 function AppContent() {
   const { connected, publicKey } = useWallet();
   const { network, setNetwork } = useCluster();
   const [instancePubkey, setInstancePubkey] = useState<string>("");
-  const [activeTab, setActiveTab] = useState<TabType>("escrow");
+  const [activeTab, setActiveTab] = useLocalStorage<TabType>("activeTab", "escrow");
+  const [escrowSection, setEscrowSection] = useLocalStorage<EscrowSection>("escrowSection", "admin");
 
   return (
     <div className="app-container">
@@ -84,10 +87,51 @@ function AppContent() {
 
                 {instancePubkey && (
                   <>
-                    <AdminFunctions instancePubkey={instancePubkey} />
-                    <StatusChecker instancePubkey={instancePubkey} />
-                    <OperatorFunctions instancePubkey={instancePubkey} />
-                    <UserFunctions instancePubkey={instancePubkey} />
+                    <div className="escrow-sections">
+                      <button
+                        className={`escrow-section-tab ${escrowSection === "admin" ? "active" : ""}`}
+                        onClick={() => setEscrowSection("admin")}
+                      >
+                        <span className="section-icon">&#9881;</span>
+                        Admin
+                      </button>
+                      <button
+                        className={`escrow-section-tab ${escrowSection === "operator" ? "active" : ""}`}
+                        onClick={() => setEscrowSection("operator")}
+                      >
+                        <span className="section-icon">&#9654;</span>
+                        Operator
+                      </button>
+                      <button
+                        className={`escrow-section-tab ${escrowSection === "user" ? "active" : ""}`}
+                        onClick={() => setEscrowSection("user")}
+                      >
+                        <span className="section-icon">&#8644;</span>
+                        User
+                      </button>
+                      <button
+                        className={`escrow-section-tab ${escrowSection === "status" ? "active" : ""}`}
+                        onClick={() => setEscrowSection("status")}
+                      >
+                        <span className="section-icon">&#8505;</span>
+                        Status
+                      </button>
+                    </div>
+
+                    <div className="escrow-section-content">
+                      {escrowSection === "admin" && (
+                        <AdminFunctions instancePubkey={instancePubkey} />
+                      )}
+                      {escrowSection === "status" && (
+                        <StatusChecker instancePubkey={instancePubkey} />
+                      )}
+                      {escrowSection === "operator" && (
+                        <OperatorFunctions instancePubkey={instancePubkey} />
+                      )}
+                      {escrowSection === "user" && (
+                        <UserFunctions instancePubkey={instancePubkey} />
+                      )}
+                    </div>
                   </>
                 )}
               </div>

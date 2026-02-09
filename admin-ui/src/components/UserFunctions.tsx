@@ -3,6 +3,7 @@ import { useSolana } from '../hooks/useSolana';
 import { useWallet } from '../hooks/useWallet';
 import { useWalletStandardAccount } from '../hooks/useWalletStandardAccount';
 import { useCluster } from '../hooks/useCluster';
+import { useLocalStorage, useRecentItems } from '../hooks/useLocalStorage';
 import { address } from '@solana/addresses';
 import { useWalletAccountTransactionSendingSigner } from '@solana/react';
 import type { UiWalletAccount } from '@wallet-standard/react';
@@ -42,11 +43,16 @@ function DepositSection({
   onError: (error: string) => void;
 }) {
   const { rpc } = useSolana();
-  const [depositMintAddress, setDepositMintAddress] = useState('');
+  const [savedMint] = useLocalStorage<string>('lastMintAddress', '');
+  const [depositMintAddress, setDepositMintAddress] = useState(savedMint);
   const [depositAmount, setDepositAmount] = useState('');
   const [recipientAddress, setRecipientAddress] = useState('');
   const [depositing, setDepositing] = useState(false);
+  const [recentMints] = useRecentItems('recentMints', 5);
   const transactionSigner = useWalletAccountTransactionSendingSigner(account, chainId);
+
+  const truncateAddress = (addr: string) =>
+    addr.length > 12 ? `${addr.slice(0, 6)}...${addr.slice(-4)}` : addr;
 
   const handleDeposit = async () => {
     if (!depositMintAddress || !depositAmount) return;
@@ -122,6 +128,23 @@ function DepositSection({
           placeholder="Enter token mint address"
           className="input"
         />
+        {recentMints.length > 0 && (
+          <div className="recent-items recent-items-inline">
+            <span className="recent-label">Recent mints</span>
+            <div className="recent-list">
+              {recentMints.map((addr) => (
+                <button
+                  key={addr}
+                  className="recent-item"
+                  onClick={() => setDepositMintAddress(addr)}
+                  title={addr}
+                >
+                  <span className="recent-item-text">{truncateAddress(addr)}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
       <div className="form-group">
         <label>Amount</label>
@@ -166,11 +189,16 @@ function WithdrawSection({
   onSuccess: (message: string) => void;
   onError: (error: string) => void;
 }) {
-  const [withdrawMintAddress, setWithdrawMintAddress] = useState('');
+  const [savedMint] = useLocalStorage<string>('lastMintAddress', '');
+  const [withdrawMintAddress, setWithdrawMintAddress] = useState(savedMint);
   const [withdrawAmount, setWithdrawAmount] = useState('');
   const [withdrawDestination, setWithdrawDestination] = useState('');
   const [withdrawing, setWithdrawing] = useState(false);
+  const [recentMints] = useRecentItems('recentMints', 5);
   const transactionSigner = useWalletAccountTransactionSendingSigner(account, chainId);
+
+  const truncateAddress = (addr: string) =>
+    addr.length > 12 ? `${addr.slice(0, 6)}...${addr.slice(-4)}` : addr;
 
   const handleWithdraw = async () => {
     if (!withdrawMintAddress || !withdrawAmount) return;
@@ -247,6 +275,23 @@ function WithdrawSection({
           placeholder="Enter token mint address"
           className="input"
         />
+        {recentMints.length > 0 && (
+          <div className="recent-items recent-items-inline">
+            <span className="recent-label">Recent mints</span>
+            <div className="recent-list">
+              {recentMints.map((addr) => (
+                <button
+                  key={addr}
+                  className="recent-item"
+                  onClick={() => setWithdrawMintAddress(addr)}
+                  title={addr}
+                >
+                  <span className="recent-item-text">{truncateAddress(addr)}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
       <div className="form-group">
         <label>Amount</label>

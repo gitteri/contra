@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useSolana } from "../hooks/useSolana";
 import { useWalletStandardAccount } from "../hooks/useWalletStandardAccount";
 import { useCluster } from "../hooks/useCluster";
+import { useLocalStorage, useRecentItems } from "../hooks/useLocalStorage";
 import { address, type Address } from "@solana/addresses";
 import { useWalletAccountTransactionSendingSigner } from "@solana/react";
 import type { UiWalletAccount } from "@wallet-standard/react";
@@ -225,9 +226,11 @@ function MintTokensSection({
 export function MintManager() {
   const { rpc } = useSolana();
   const { network } = useCluster();
-  const [mintAddress, setMintAddress] = useState("");
+  const [savedMint, setSavedMint] = useLocalStorage<string>('lastMintAddress', '');
+  const [mintAddress, setMintAddress] = useState(savedMint);
   const [loading, setLoading] = useState(false);
   const [mintData, setMintData] = useState<MintData | null>(null);
+  const [recentMints, addRecentMint] = useRecentItems('recentMints', 5);
   const [balance, setBalance] = useState<{
     amount: string;
     decimals: number;
@@ -370,6 +373,10 @@ export function MintManager() {
 
       setMintData(mint);
 
+      // Persist the mint address
+      setSavedMint(mintAddress);
+      addRecentMint(mintAddress);
+
       // Fetch user's token account balance only if wallet is connected
       if (walletAddress) {
         try {
@@ -462,6 +469,28 @@ export function MintManager() {
             {loading ? "Loading..." : "Load Mint"}
           </button>
         </div>
+
+        {recentMints.length > 0 && (
+          <div className="recent-items recent-items-inline">
+            <span className="recent-label">Recent mints</span>
+            <div className="recent-list">
+              {recentMints.map((addr) => (
+                <button
+                  key={addr}
+                  className={`recent-item ${mintAddress === addr ? 'active' : ''}`}
+                  onClick={() => {
+                    setMintAddress(addr);
+                  }}
+                  title={addr}
+                >
+                  <span className="recent-item-text">
+                    {addr.length > 12 ? `${addr.slice(0, 6)}...${addr.slice(-4)}` : addr}
+                  </span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
 
         {error && (
           <div className="error-message">

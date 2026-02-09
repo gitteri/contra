@@ -3,6 +3,7 @@ import { useSolana } from '../hooks/useSolana';
 import { useWallet } from '../hooks/useWallet';
 import { useWalletStandardAccount } from '../hooks/useWalletStandardAccount';
 import { useCluster } from '../hooks/useCluster';
+import { useLocalStorage, useRecentItems } from '../hooks/useLocalStorage';
 import { address } from '@solana/addresses';
 import { useWalletAccountTransactionSendingSigner } from '@solana/react';
 import { getBase58Decoder } from '@solana/codecs-strings';
@@ -53,15 +54,20 @@ function OperatorFunctionsContent({ instancePubkey, account, network }: Operator
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState<string | null>(null);
-  const [mintAddress, setMintAddress] = useState('');
+  const [savedMint] = useLocalStorage<string>('lastMintAddress', '');
+  const [mintAddress, setMintAddress] = useState(savedMint);
   const [userAddress, setUserAddress] = useState('');
   const [amount, setAmount] = useState('');
   const [newWithdrawalRoot, setNewWithdrawalRoot] = useState('');
   const [transactionNonce, setTransactionNonce] = useState('');
   const [siblingProofs, setSiblingProofs] = useState('');
+  const [recentMints] = useRecentItems('recentMints', 5);
 
   const chainId = (network === 'localnet' ? 'solana:devnet' : `solana:${network}`) as `solana:${string}`;
   const transactionSigner = useWalletAccountTransactionSendingSigner(account, chainId);
+
+  const truncateAddress = (addr: string) =>
+    addr.length > 12 ? `${addr.slice(0, 6)}...${addr.slice(-4)}` : addr;
 
   const handleReleaseFunds = async () => {
     if (!mintAddress || !userAddress || !amount || !newWithdrawalRoot || !transactionNonce || !siblingProofs) {
@@ -225,6 +231,23 @@ function OperatorFunctionsContent({ instancePubkey, account, network }: Operator
             placeholder="Enter token mint address"
             className="input"
           />
+          {recentMints.length > 0 && (
+            <div className="recent-items recent-items-inline">
+              <span className="recent-label">Recent mints</span>
+              <div className="recent-list">
+                {recentMints.map((addr) => (
+                  <button
+                    key={addr}
+                    className="recent-item"
+                    onClick={() => setMintAddress(addr)}
+                    title={addr}
+                  >
+                    <span className="recent-item-text">{truncateAddress(addr)}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
         <div className="form-group">
           <label>User Address</label>
