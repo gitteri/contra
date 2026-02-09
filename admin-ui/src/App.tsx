@@ -25,14 +25,13 @@ type EscrowSection = "admin" | "operator" | "user" | "status";
 
 function AppContent() {
   const { connected, publicKey } = useWallet();
-  const { network, setNetwork, endpoint } = useCluster();
+  const { network, setNetwork } = useCluster();
   const [instancePubkey, setInstancePubkey] = useState<string>("");
   const [activeTab, setActiveTab] = useLocalStorage<TabType>("activeTab", "escrow");
   const [escrowSection, setEscrowSection] = useLocalStorage<EscrowSection>("escrowSection", "admin");
 
   const { transactions, stats, isPolling, start, stop } = useActivityFeed(
-    instancePubkey || null,
-    endpoint
+    instancePubkey || null
   );
 
   return (

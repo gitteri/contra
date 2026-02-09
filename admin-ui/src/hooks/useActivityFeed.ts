@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { createSolanaRpc } from '@solana/rpc';
 import { address } from '@solana/addresses';
+import type { Signature } from '@solana/keys';
 import { CONTRA_READ_URL } from '../utils/contraRpc';
 import { useSolana } from './useSolana';
 import type { ActivityTransaction, ActivityStats } from '../types/activity';
@@ -79,15 +80,15 @@ function computeStats(txs: ActivityTransaction[]): ActivityStats {
   };
 }
 
-export function useActivityFeed(instancePubkey: string | null, _solanaEndpoint?: string) {
+export function useActivityFeed(instancePubkey: string | null) {
   const { rpc: solanaRpc } = useSolana();
   const [transactions, setTransactions] = useState<ActivityTransaction[]>([]);
   const [stats, setStats] = useState<ActivityStats>(computeStats([]));
   const [isPolling, setIsPolling] = useState(false);
 
   const seenSigs = useRef(new Set<string>());
-  const lastSolanaSig = useRef<string | undefined>(undefined);
-  const lastContraSig = useRef<string | undefined>(undefined);
+  const lastSolanaSig = useRef<Signature | undefined>(undefined);
+  const lastContraSig = useRef<Signature | undefined>(undefined);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const addTransactions = useCallback((incoming: ActivityTransaction[]) => {
@@ -107,10 +108,11 @@ export function useActivityFeed(instancePubkey: string | null, _solanaEndpoint?:
     if (!instancePubkey) return;
 
     try {
-      const sigOpts: { limit: number; until?: string } = { limit: 25 };
-      if (lastSolanaSig.current) sigOpts.until = lastSolanaSig.current;
+      const opts: { limit: number; until?: Signature } = { limit: 25 };
+      if (lastSolanaSig.current) opts.until = lastSolanaSig.current;
+
       const result = await solanaRpc
-        .getSignaturesForAddress(address(instancePubkey), sigOpts)
+        .getSignaturesForAddress(address(instancePubkey), opts)
         .send();
 
       if (!result || result.length === 0) return;
@@ -130,24 +132,27 @@ export function useActivityFeed(instancePubkey: string | null, _solanaEndpoint?:
 
         try {
           const txDetail = await solanaRpc
-            .getTransaction(sig.signature as Parameters<typeof solanaRpc.getTransaction>[0], {
+            .getTransaction(sig.signature, {
               maxSupportedTransactionVersion: 0,
+              encoding: 'jsonParsed',
             })
             .send();
 
           if (txDetail?.transaction?.message) {
             const msg = txDetail.transaction.message;
-            const accountKeys = msg.accountKeys || [];
+            const accountKeys = msg.accountKeys ?? [];
 
             // First account is typically the fee payer / signer
-            from = accountKeys[0] ?? '';
+            if (accountKeys[0]) {
+              from = String(accountKeys[0].pubkey);
+            }
 
-            // Check if this is an escrow program instruction
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             const instructions = (msg as any).instructions || [];
             for (const ix of instructions) {
-              const progIdx = ix.programIdIndex;
-              if (accountKeys[progIdx] === CONTRA_ESCROW_PROGRAM_PROGRAM_ADDRESS) {
+              // jsonParsed gives us programId directly
+              const programId = ix.programId ?? '';
+              if (String(programId) === CONTRA_ESCROW_PROGRAM_PROGRAM_ADDRESS) {
                 // Decode discriminator from instruction data
                 if (ix.data) {
                   try {
@@ -161,10 +166,9 @@ export function useActivityFeed(instancePubkey: string | null, _solanaEndpoint?:
 
                 // Extract 'to' from accounts based on instruction type
                 if (txType === 'deposit' || txType === 'release') {
-                  // user is typically account[1] for deposit, account at index 6 for release
-                  const accountIndices = ix.accounts || [];
-                  if (txType === 'release' && accountIndices.length > 6) {
-                    to = accountKeys[accountIndices[6]] ?? '';
+                  const accounts = ix.accounts || [];
+                  if (txType === 'release' && accounts.length > 6) {
+                    to = String(accounts[6]);
                   }
                 }
                 break;
@@ -183,7 +187,7 @@ export function useActivityFeed(instancePubkey: string | null, _solanaEndpoint?:
           to,
           amount: null,
           mint: null,
-          timestamp: sig.blockTime ?? Math.floor(Date.now() / 1000),
+          timestamp: Number(sig.blockTime ?? Math.floor(Date.now() / 1000)),
           status: sig.err ? 'failed' : 'confirmed',
         });
       }
@@ -201,11 +205,11 @@ export function useActivityFeed(instancePubkey: string | null, _solanaEndpoint?:
     try {
       const contraRpc = createSolanaRpc(CONTRA_READ_URL);
 
-      // Poll recent signatures for the instance address on Contra
-      const contraSigOpts: { limit: number; until?: string } = { limit: 25 };
-      if (lastContraSig.current) contraSigOpts.until = lastContraSig.current;
+      const opts: { limit: number; until?: Signature } = { limit: 25 };
+      if (lastContraSig.current) opts.until = lastContraSig.current;
+
       const result = await contraRpc
-        .getSignaturesForAddress(address(instancePubkey), contraSigOpts)
+        .getSignaturesForAddress(address(instancePubkey), opts)
         .send();
 
       if (!result || result.length === 0) return;
@@ -220,12 +224,12 @@ export function useActivityFeed(instancePubkey: string | null, _solanaEndpoint?:
         newTxs.push({
           signature: sig.signature,
           chain: 'contra',
-          type: 'transfer', // Most Contra activity is SPL transfers
+          type: 'transfer',
           from: '',
           to: '',
           amount: null,
           mint: null,
-          timestamp: sig.blockTime ?? Math.floor(Date.now() / 1000),
+          timestamp: Number(sig.blockTime ?? Math.floor(Date.now() / 1000)),
           status: sig.err ? 'failed' : 'confirmed',
         });
       }
@@ -277,7 +281,6 @@ export function useActivityFeed(instancePubkey: string | null, _solanaEndpoint?:
     if (intervalRef.current) {
       stop();
       if (instancePubkey) {
-        // Small delay to let state settle
         setTimeout(start, 100);
       }
     }

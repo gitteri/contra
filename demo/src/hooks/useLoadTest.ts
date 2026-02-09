@@ -103,6 +103,49 @@ export const useLoadTest = () => {
     []
   );
 
+  const pollConfirmation = useCallback(
+    async (txId: string, signature: string, senderPubkey: string, receiverAddress: string) => {
+      const maxPolls = 50;
+      const pollInterval = 100;
+
+      for (let pollCount = 1; pollCount <= maxPolls; pollCount++) {
+        if (!testStateRef.current.isRunning) break;
+
+        try {
+          const result = await getTransaction(signature, READ_URL);
+          if (result) {
+            setTransactions((prev) =>
+              prev.map((tx) =>
+                tx.id === txId ? { ...tx, status: "confirmed", pollCount } : tx
+              )
+            );
+            setStatistics((prev) => ({
+              ...prev,
+              confirmedTransactions: prev.confirmedTransactions + 1,
+            }));
+
+            // Update both balances in parallel
+            updateWalletBalance(senderPubkey, "sender");
+            updateWalletBalance(receiverAddress, "receiver");
+            return;
+          }
+        } catch (error) {
+          console.error("Poll error:", error);
+        }
+
+        await new Promise((resolve) => setTimeout(resolve, pollInterval));
+      }
+
+      // Failed to confirm
+      setTransactions((prev) =>
+        prev.map((tx) =>
+          tx.id === txId ? { ...tx, status: "failed", pollCount: maxPolls } : tx
+        )
+      );
+    },
+    [updateWalletBalance]
+  );
+
   const executeTransfer = useCallback(
     async (senderIndex: number, receiverIndex: number): Promise<boolean> => {
       if (!testStateRef.current.mint || !testStateRef.current.isRunning)
@@ -110,15 +153,14 @@ export const useLoadTest = () => {
 
       const sender = testStateRef.current.senderKeypairs[senderIndex];
       const receiver = testStateRef.current.receiverWallets[receiverIndex];
-      // Generate amount between 0.01 and 1 tokens (with 6 decimals)
-      const amount = Math.floor(Math.random() * 1000000) + 10000; // 0.01 to 1 tokens
+      const amount = Math.floor(Math.random() * 1000000) + 10000;
 
       const txId = `tx-${Date.now()}-${Math.random()}`;
       const newTx: Transaction = {
         id: txId,
         from: sender.publicKey.toString().slice(0, 8),
         to: receiver.address.toString().slice(0, 8),
-        amount: amount / 1000000, // Convert to UI amount for display
+        amount: amount / 1000000,
         signature: "",
         status: "pending",
         timestamp: Date.now(),
@@ -127,7 +169,6 @@ export const useLoadTest = () => {
       setTransactions((prev) => [...prev, newTx]);
 
       try {
-        // Send transaction
         const transaction = await createTransferTransaction(
           sender,
           receiver.address,
@@ -154,14 +195,13 @@ export const useLoadTest = () => {
         // Update RPS tracking
         const now = Date.now();
         if (now - testStateRef.current.lastRpsCalculation >= 1000) {
-          // Reset RPS counter every second
           testStateRef.current.requestsSentInLastSecond = 1;
           testStateRef.current.lastRpsCalculation = now;
         } else {
           testStateRef.current.requestsSentInLastSecond++;
         }
 
-        // Update statistics with send info
+        // Update statistics
         setStatistics((prev) => {
           const txWithLatency = prev.transactionsWithLatency || 0;
           const duration = prev.startTime ? (now - prev.startTime) / 1000 : 0;
@@ -189,61 +229,10 @@ export const useLoadTest = () => {
           };
         });
 
-        // Wait for transaction confirmation and balance updates
-        let pollCount = 0;
-        const maxPolls = 50;
-        const pollInterval = 100;
-        let confirmed = false;
+        // Fire-and-forget: poll confirmation + balance updates in background
+        pollConfirmation(txId, signature, sender.publicKey.toString(), receiver.address.toString());
 
-        while (
-          pollCount < maxPolls &&
-          testStateRef.current.isRunning &&
-          !confirmed
-        ) {
-          pollCount++;
-
-          try {
-            const result = await getTransaction(signature, READ_URL);
-
-            if (result) {
-              // Transaction confirmed
-              setTransactions((prev) =>
-                prev.map((tx) =>
-                  tx.id === txId
-                    ? { ...tx, status: "confirmed", pollCount }
-                    : tx
-                )
-              );
-
-              setStatistics((prev) => ({
-                ...prev,
-                confirmedTransactions: prev.confirmedTransactions + 1,
-              }));
-
-              // Update balances for both wallets using full addresses
-              await updateWalletBalance(sender.publicKey.toString(), "sender");
-              await updateWalletBalance(receiver.address.toString(), "receiver");
-
-              confirmed = true;
-              return true;
-            }
-          } catch (error) {
-            console.error("Poll error:", error);
-          }
-
-          // Wait before next poll
-          await new Promise((resolve) => setTimeout(resolve, pollInterval));
-        }
-
-        // Transaction failed to confirm
-        if (!confirmed) {
-          setTransactions((prev) =>
-            prev.map((tx) =>
-              tx.id === txId ? { ...tx, status: "failed", pollCount } : tx
-            )
-          );
-          return false;
-        }
+        return true;
       } catch (error) {
         console.error("Transfer failed:", error);
         setTransactions((prev) =>
@@ -256,10 +245,8 @@ export const useLoadTest = () => {
         }));
         return false;
       }
-
-      return true;
     },
-    [updateWalletBalance]
+    [pollConfirmation]
   );
 
   const setupAccounts = async (numUsers: number) => {
@@ -310,44 +297,38 @@ export const useLoadTest = () => {
     const mintTx = createMintTransaction(admin, mint);
     await sendTransaction(mintTx, [admin], WRITE_URL, READ_URL);
 
-    // Create ATAs
+    // Create all ATAs in parallel
     console.log("Creating token accounts...");
-    for (let i = 0; i < numUsers; i++) {
-      const senderATA = await createATATransaction(
-        senderKeypairs[i],
-        senderKeypairs[i].publicKey,
-        mint
-      );
-      await sendTransaction(senderATA, [senderKeypairs[i]], WRITE_URL, READ_URL);
+    await Promise.all(
+      senderKeypairs.flatMap((kp, i) => [
+        createATATransaction(kp, kp.publicKey, mint).then((tx) =>
+          sendTransaction(tx, [kp], WRITE_URL, READ_URL)
+        ),
+        createATATransaction(kp, receiverWallets[i].address, mint).then((tx) =>
+          sendTransaction(tx, [kp], WRITE_URL, READ_URL)
+        ),
+      ])
+    );
 
-      const receiverATA = await createATATransaction(
-        senderKeypairs[i],
-        receiverWallets[i].address,
-        mint
-      );
-      await sendTransaction(receiverATA, [senderKeypairs[i]], WRITE_URL, READ_URL);
-    }
-
-    // Wait for ATAs to be created
+    // Wait for ATAs to propagate
     await new Promise((resolve) => setTimeout(resolve, 1000));
 
-    // Mint tokens to senders
+    // Mint tokens to all senders in parallel
     console.log("Minting tokens to senders...");
-    for (const sender of senderWallets) {
-      const ata = await getAssociatedTokenAddress(mint, sender.address);
-      const mintToTx = createMintToTransaction(
-        admin,
-        mint,
-        ata,
-        INITIAL_BALANCE
-      );
-      await sendTransaction(mintToTx, [admin], WRITE_URL, READ_URL);
-    }
+    await Promise.all(
+      senderWallets.map(async (sender) => {
+        const ata = await getAssociatedTokenAddress(mint, sender.address);
+        const mintToTx = createMintToTransaction(admin, mint, ata, INITIAL_BALANCE);
+        return sendTransaction(mintToTx, [admin], WRITE_URL, READ_URL);
+      })
+    );
 
-    // Update initial balances
-    for (const sender of senderWallets) {
-      await updateWalletBalance(sender.address.toString(), "sender");
-    }
+    // Update initial balances in parallel
+    await Promise.all(
+      senderWallets.map((sender) =>
+        updateWalletBalance(sender.address.toString(), "sender")
+      )
+    );
   };
 
   const startTest = async (params: TestParams) => {
