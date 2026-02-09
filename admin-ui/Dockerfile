@@ -22,6 +22,11 @@ WORKDIR /app/admin-ui
 
 RUN pnpm install --frozen-lockfile
 
+# The generated TS clients import @solana/kit etc. but have no node_modules.
+# Symlink admin-ui's node_modules so tsc can resolve deps from the client paths.
+RUN ln -s /app/admin-ui/node_modules /app/contra-escrow-program/clients/typescript/node_modules && \
+    ln -s /app/admin-ui/node_modules /app/contra-withdraw-program/clients/typescript/node_modules
+
 ARG CONTRA_RPC_URL
 ENV CONTRA_RPC_URL=${CONTRA_RPC_URL}
 RUN pnpm build
