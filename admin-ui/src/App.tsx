@@ -26,39 +26,32 @@ function AppContent() {
   return (
     <div className="app-container">
       <header className="app-header">
-        <h1>Contra Admin UI</h1>
-        <div
-          className="header-actions"
-          style={{ display: "flex", gap: "1rem", alignItems: "center" }}
-        >
+        <h1>Contra</h1>
+        <div className="header-actions">
           <select
             value={network}
             onChange={(e) => setNetwork(e.target.value as NetworkType)}
-            className="input"
-            style={{ padding: "0.5rem", minWidth: "120px" }}
+            className="network-select"
           >
             <option value="devnet">Devnet</option>
             <option value="testnet">Testnet</option>
             <option value="mainnet-beta">Mainnet</option>
             <option value="localnet">Localnet</option>
           </select>
-          <div style={{ minWidth: "200px" }}>
-            <ConnectWalletButton />
-          </div>
+          <ConnectWalletButton />
         </div>
       </header>
 
       <main className="app-main">
         {!connected ? (
           <div className="connect-prompt">
-            <h2>Connect your wallet to manage your Contra instance</h2>
-            <p>Use the button above to connect your Solana wallet</p>
-            <p className="info-text">Powered by Anza Wallet Adapter</p>
+            <h2>Connect your wallet</h2>
+            <p>Manage your Contra escrow instance</p>
           </div>
         ) : (
           <div className="dashboard">
             <div className="wallet-info">
-              <h3>Connected Wallet</h3>
+              <h3>Wallet</h3>
               <p className="wallet-address">{publicKey?.toBase58()}</p>
             </div>
 
@@ -67,19 +60,19 @@ function AppContent() {
                 className={`tab ${activeTab === "escrow" ? "active" : ""}`}
                 onClick={() => setActiveTab("escrow")}
               >
-                Escrow Management
+                Escrow
               </button>
               <button
                 className={`tab ${activeTab === "mint" ? "active" : ""}`}
                 onClick={() => setActiveTab("mint")}
               >
-                Mint Management
+                Mint
               </button>
               <button
                 className={`tab ${activeTab === "contra" ? "active" : ""}`}
                 onClick={() => setActiveTab("contra")}
               >
-                Contra Management
+                Contra
               </button>
             </div>
 
@@ -112,13 +105,6 @@ function AppContent() {
           </div>
         )}
       </main>
-
-      <footer className="app-footer">
-        <p>Contra Escrow & Withdraw Management Interface</p>
-        <p className="footer-note">
-          Built with Anza Wallet Adapter & @solana/kit - Modern Solana tooling!
-        </p>
-      </footer>
     </div>
   );
 }

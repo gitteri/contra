@@ -237,19 +237,13 @@ export function InstanceManager({ onInstanceSelect }: InstanceManagerProps) {
       {error && <div className="error-message">{error}</div>}
 
       {createSuccess && (
-        <div style={{ marginTop: '1rem', padding: '1rem', backgroundColor: 'rgba(76, 175, 80, 0.2)', borderRadius: '8px' }}>
-          <p style={{ margin: 0, color: '#4caf50', fontWeight: 'bold', marginBottom: '0.5rem' }}>
-            {createSuccess.split('!')[0]}!
-          </p>
+        <div className="alert alert-success">
+          <span className="alert-title">{createSuccess.split('!')[0]}!</span>
           {createSuccess.includes('Address:') && (
-            <p style={{ margin: 0, fontSize: '0.85rem', wordBreak: 'break-all' }}>
-              {createSuccess.split('Address: ')[1]}
-            </p>
+            <span className="alert-body">{createSuccess.split('Address: ')[1]}</span>
           )}
           {createSuccess.includes('Check status:') && (
-            <p style={{ margin: 0, fontSize: '0.85rem', wordBreak: 'break-all' }}>
-              Signature: {createSuccess.split('Check status: ')[1]}
-            </p>
+            <span className="alert-body">Signature: {createSuccess.split('Check status: ')[1]}</span>
           )}
         </div>
       )}

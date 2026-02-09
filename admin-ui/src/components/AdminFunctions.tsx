@@ -377,13 +377,9 @@ function AdminFunctionsContent({ instancePubkey, account, network }: AdminFuncti
       {error && <div className="error-message">{error}</div>}
 
       {success && (
-        <div style={{ marginTop: '1rem', padding: '1rem', backgroundColor: 'rgba(76, 175, 80, 0.2)', borderRadius: '8px' }}>
-          <p style={{ margin: 0, color: '#4caf50', fontWeight: 'bold', marginBottom: '0.5rem' }}>
-            {success.split('!')[0]}!
-          </p>
-          <p style={{ margin: 0, fontSize: '0.85rem', wordBreak: 'break-all' }}>
-            Signature: {success.split('Signature: ')[1]}
-          </p>
+        <div className="alert alert-success">
+          <span className="alert-title">{success.split('!')[0]}!</span>
+          <span className="alert-body">Signature: {success.split('Signature: ')[1]}</span>
         </div>
       )}
 
@@ -482,8 +478,8 @@ function AdminFunctionsContent({ instancePubkey, account, network }: AdminFuncti
             placeholder="Enter decimals (e.g., 9)"
             className="input"
           />
-          <p className="info-text" style={{ marginTop: '0.5rem', fontSize: '0.85rem' }}>
-            Standard tokens use 9 decimals. NFTs typically use 0 decimals.
+          <p className="info-text">
+            Standard tokens use 9 decimals. NFTs typically use 0.
           </p>
         </div>
         <button
@@ -494,17 +490,10 @@ function AdminFunctionsContent({ instancePubkey, account, network }: AdminFuncti
           {loading ? 'Creating...' : 'Create Mint'}
         </button>
         {createdMintAddress && (
-          <div style={{ marginTop: '1rem', padding: '1rem', backgroundColor: 'rgba(33, 150, 243, 0.2)', borderRadius: '8px' }}>
-            <p style={{ margin: 0, color: '#2196f3', fontWeight: 'bold', marginBottom: '0.5rem' }}>
-              Mint Created Successfully!
-            </p>
-            <div className="info-row">
-              <span className="info-label">Mint Address:</span>
-              <span className="info-value mono" style={{ wordBreak: 'break-all' }}>{createdMintAddress}</span>
-            </div>
-            <p className="info-text" style={{ marginTop: '0.5rem', fontSize: '0.85rem' }}>
-              Copy this address to use in the "Allow Mint" section above or in the Mint Management tab to mint tokens.
-            </p>
+          <div className="alert alert-info">
+            <span className="alert-title">Mint Created</span>
+            <span className="alert-body">{createdMintAddress}</span>
+            <span className="info-text">Copy this address for the Allow Mint section or the Mint tab.</span>
           </div>
         )}
       </div>

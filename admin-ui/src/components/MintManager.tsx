@@ -165,15 +165,8 @@ function MintTokensSection({
 
   if (!isUserMintAuthority) {
     return (
-      <div
-        style={{
-          marginTop: "1.5rem",
-          padding: "1rem",
-          backgroundColor: "rgba(255, 152, 0, 0.1)",
-          borderRadius: "8px",
-        }}
-      >
-        <p className="info-text" style={{ color: "#ff9800" }}>
+      <div className="mint-authority-section not-authority">
+        <p className="info-text mint-authority-label negative">
           You are not the mint authority. Only the mint authority can mint new
           tokens.
         </p>
@@ -182,19 +175,9 @@ function MintTokensSection({
   }
 
   return (
-    <div
-      style={{
-        marginTop: "1.5rem",
-        padding: "1rem",
-        backgroundColor: "rgba(76, 175, 80, 0.1)",
-        borderRadius: "8px",
-      }}
-    >
+    <div className="mint-authority-section is-authority">
       <h3>Mint Tokens</h3>
-      <p
-        className="info-text"
-        style={{ marginBottom: "1rem", color: "#4caf50" }}
-      >
+      <p className="info-text mint-authority-label positive">
         You are the mint authority for this token
       </p>
 
@@ -219,10 +202,7 @@ function MintTokensSection({
           className="input"
         />
         {mintAmount && !isNaN(parseFloat(mintAmount)) && (
-          <p
-            className="info-text"
-            style={{ marginTop: "0.5rem", fontSize: "0.85rem" }}
-          >
+          <p className="info-text">
             Raw amount:{" "}
             {Math.floor(
               parseFloat(mintAmount || "0") * Math.pow(10, mintData.decimals)
@@ -484,13 +464,13 @@ export function MintManager() {
         </div>
 
         {error && (
-          <div className="error-message" style={{ marginTop: "1rem" }}>
+          <div className="error-message">
             {error}
           </div>
         )}
 
         {mintData && (
-          <div style={{ marginTop: "1.5rem" }}>
+          <div className="instance-info">
             <h3>Mint Information</h3>
 
             <div className="info-row">
@@ -507,14 +487,14 @@ export function MintManager() {
 
             <div className="info-row">
               <span className="info-label">Mint Authority:</span>
-              <span className="info-value mono" style={{ fontSize: "0.85rem" }}>
+              <span className="info-value mono">
                 {mintData.mintAuthority || "None (Frozen)"}
               </span>
             </div>
 
             <div className="info-row">
               <span className="info-label">Freeze Authority:</span>
-              <span className="info-value mono" style={{ fontSize: "0.85rem" }}>
+              <span className="info-value mono">
                 {mintData.freezeAuthority || "None"}
               </span>
             </div>
@@ -522,25 +502,12 @@ export function MintManager() {
         )}
 
         {balance && (
-          <div style={{ marginTop: "1.5rem" }}>
-            <h3>Your Balance</h3>
-
-            <div className="info-row">
-              <span className="info-label">Amount:</span>
-              <span
-                className="info-value"
-                style={{ fontSize: "1.2rem", fontWeight: "bold" }}
-              >
-                {balance.uiAmount}
-              </span>
-            </div>
-
-            <div className="info-row">
-              <span className="info-label">Raw Amount:</span>
-              <span className="info-value mono" style={{ fontSize: "0.85rem" }}>
-                {balance.amount}
-              </span>
-            </div>
+          <div className="balance-display">
+            <h4>Your Balance</h4>
+            <p className="balance-amount">{balance.uiAmount}</p>
+            <p className="balance-raw">
+              Raw: {balance.amount}
+            </p>
           </div>
         )}
 
@@ -556,36 +523,10 @@ export function MintManager() {
           />
         )}
 
-        {error && (
-          <div className="error-message" style={{ marginTop: "1rem" }}>
-            {error}
-          </div>
-        )}
-
         {mintSuccess && (
-          <div
-            style={{
-              marginTop: "1rem",
-              padding: "1rem",
-              backgroundColor: "rgba(76, 175, 80, 0.2)",
-              borderRadius: "8px",
-            }}
-          >
-            <p
-              style={{
-                margin: 0,
-                color: "#4caf50",
-                fontWeight: "bold",
-                marginBottom: "0.5rem",
-              }}
-            >
-              Tokens minted successfully!
-            </p>
-            <p
-              style={{ margin: 0, fontSize: "0.85rem", wordBreak: "break-all" }}
-            >
-              Signature: {mintSuccess.split("Signature: ")[1]}
-            </p>
+          <div className="alert alert-success">
+            <span className="alert-title">Tokens minted successfully!</span>
+            <span className="alert-body">Signature: {mintSuccess.split("Signature: ")[1]}</span>
           </div>
         )}
       </div>

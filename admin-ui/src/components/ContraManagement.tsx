@@ -139,35 +139,24 @@ function WithdrawSection({
         Withdraw tokens from Contra back to Solana mainnet
       </p>
       {contraBalance && (
-        <div
-          style={{
-            marginBottom: "1rem",
-            padding: "0.5rem",
-            backgroundColor: "rgba(0, 0, 0, 0.2)",
-            borderRadius: "4px",
-          }}
-        >
-          <p style={{ margin: 0, fontSize: "0.9rem" }}>
-            <strong>Contra Balance:</strong> {contraBalance.uiAmount}
-          </p>
+        <div className="balance-callout">
+          <strong>Contra Balance:</strong> {contraBalance.uiAmount}
         </div>
       )}
       <div className="form-group">
         <label>Amount (in smallest units)</label>
-        <div style={{ display: "flex", gap: "0.5rem" }}>
+        <div className="input-group">
           <input
             type="text"
             value={withdrawAmount}
             onChange={(e) => setWithdrawAmount(e.target.value)}
             placeholder="Enter amount to withdraw"
             className="input"
-            style={{ flex: 1 }}
           />
           <button
             onClick={handleMaxClick}
             disabled={!contraBalance || withdrawing}
-            className="button"
-            style={{ padding: "0.5rem 1rem" }}
+            className="button button-max"
           >
             Max
           </button>
@@ -341,17 +330,8 @@ function TransferSection({
         Transfer tokens to another address on Contra (regular SPL transfer)
       </p>
       {contraBalance && (
-        <div
-          style={{
-            marginBottom: "1rem",
-            padding: "0.5rem",
-            backgroundColor: "rgba(0, 0, 0, 0.2)",
-            borderRadius: "4px",
-          }}
-        >
-          <p style={{ margin: 0, fontSize: "0.9rem" }}>
-            <strong>Contra Balance:</strong> {contraBalance.uiAmount}
-          </p>
+        <div className="balance-callout">
+          <strong>Contra Balance:</strong> {contraBalance.uiAmount}
         </div>
       )}
       <div className="form-group">
@@ -366,20 +346,18 @@ function TransferSection({
       </div>
       <div className="form-group">
         <label>Amount (in smallest units)</label>
-        <div style={{ display: "flex", gap: "0.5rem" }}>
+        <div className="input-group">
           <input
             type="text"
             value={transferAmount}
             onChange={(e) => setTransferAmount(e.target.value)}
             placeholder="Enter amount to transfer"
             className="input"
-            style={{ flex: 1 }}
           />
           <button
             onClick={handleMaxClick}
             disabled={!contraBalance || transferring}
-            className="button"
-            style={{ padding: "0.5rem 1rem" }}
+            className="button button-max"
           >
             Max
           </button>
@@ -487,37 +465,16 @@ export function ContraManagement() {
         Check your token balance on Contra, transfer tokens, and withdraw back
         to mainnet
       </p>
-      <p
-        className="info-text"
-        style={{ fontSize: "0.85rem", marginTop: "0.5rem" }}
-      >
+      <p className="info-text">
         Connected to Contra RPC: {CONTRA_RPC_URL}
       </p>
 
       {error && <div className="error-message">{error}</div>}
 
       {success && (
-        <div
-          style={{
-            marginTop: "1rem",
-            padding: "1rem",
-            backgroundColor: "rgba(76, 175, 80, 0.2)",
-            borderRadius: "8px",
-          }}
-        >
-          <p
-            style={{
-              margin: 0,
-              color: "#4caf50",
-              fontWeight: "bold",
-              marginBottom: "0.5rem",
-            }}
-          >
-            {success.split("!")[0]}!
-          </p>
-          <p style={{ margin: 0, fontSize: "0.85rem", wordBreak: "break-all" }}>
-            Signature: {success.split("Signature: ")[1]}
-          </p>
+        <div className="alert alert-success">
+          <span className="alert-title">{success.split("!")[0]}!</span>
+          <span className="alert-body">Signature: {success.split("Signature: ")[1]}</span>
         </div>
       )}
 
@@ -545,33 +502,11 @@ export function ContraManagement() {
         </button>
 
         {contraBalance && (
-          <div
-            style={{
-              marginTop: "1rem",
-              padding: "1rem",
-              backgroundColor: "rgba(33, 150, 243, 0.2)",
-              borderRadius: "8px",
-            }}
-          >
-            <h4 style={{ margin: "0 0 0.5rem 0" }}>Contra Balance</h4>
-            <p
-              style={{
-                margin: "0.25rem 0",
-                fontSize: "1.2rem",
-                fontWeight: "bold",
-              }}
-            >
-              {contraBalance.uiAmount}
-            </p>
-            <p
-              style={{
-                margin: "0.25rem 0",
-                fontSize: "0.85rem",
-                color: "rgba(255, 255, 255, 0.7)",
-              }}
-            >
-              Raw amount: {contraBalance.amount} (decimals:{" "}
-              {contraBalance.decimals})
+          <div className="balance-display">
+            <h4>Contra Balance</h4>
+            <p className="balance-amount">{contraBalance.uiAmount}</p>
+            <p className="balance-raw">
+              Raw: {contraBalance.amount} (decimals: {contraBalance.decimals})
             </p>
           </div>
         )}
