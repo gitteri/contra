@@ -117,7 +117,7 @@ export const createTransferTransaction = async (
   return transaction;
 };
 
-const BLOCKHASH_TTL_MS = 50_000;
+const BLOCKHASH_TTL_MS = 15_000;
 
 let cachedBlockhash: { value: string; fetchedAt: number } | null = null;
 let inflight: Promise<string> | null = null;
