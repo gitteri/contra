@@ -29,7 +29,10 @@ RUN ln -s /app/admin-ui/node_modules /app/contra-escrow-program/clients/typescri
 
 # Client code uses /contra-read and /contra-write (relative paths).
 # The production server.mjs proxies these to the real RPC URLs at runtime.
-# No RPC URLs need to be baked into the build.
+# CONTRA_WS_URL must be baked in at build time because the browser connects
+# directly to the streamer WebSocket (not proxied through server.mjs).
+ARG CONTRA_WS_URL=""
+ENV CONTRA_WS_URL=${CONTRA_WS_URL}
 RUN pnpm build
 
 # Production: lightweight server that serves static files + proxies RPC
@@ -42,7 +45,10 @@ WORKDIR /app
 
 EXPOSE 3000
 
-# Set RPC URLs via Railway service variables at runtime:
+# Runtime env vars (set via Railway service variables):
 #   CONTRA_READ_URL=https://read-node-production.up.railway.app
 #   CONTRA_WRITE_URL=https://write-node-production.up.railway.app
+#
+# Build-time arg (set via Railway service variables -- requires RAILWAY_DOCKER_BUILD_ARGS):
+#   CONTRA_WS_URL=wss://streamer-production-xxxx.up.railway.app/ws
 CMD ["node", "server.mjs"]

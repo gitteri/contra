@@ -193,13 +193,15 @@ The streamer needs a **public domain** for the admin-ui (and any other frontend)
 
 The admin UI is a static React/Vite app. It connects to Solana RPC directly (via wallet) and to the Contra gateway for L2 operations.
 
-| Variable | Value |
-|---|---|
-| `CONTRA_RPC_URL` | Gateway public URL (e.g., `https://gateway-production-xxxx.up.railway.app`) |
-| `CONTRA_WS_URL` | Streamer WebSocket URL (e.g., `wss://streamer-production-xxxx.up.railway.app/ws`) |
-| `PORT` | `3000` |
+| Variable | Kind | Value |
+|---|---|---|
+| `CONTRA_RPC_URL` | Runtime | Gateway public URL (e.g., `https://gateway-production-xxxx.up.railway.app`) |
+| `CONTRA_WS_URL` | **Build arg** | Streamer WebSocket URL (e.g., `wss://streamer-production-xxxx.up.railway.app/ws`) |
+| `PORT` | Runtime | `3000` |
 
-`CONTRA_RPC_URL` and `CONTRA_WS_URL` are baked into the static build at build time via `vite.config.ts`. You must set them **before** deploying so they're embedded in the JS bundle. If you change the gateway or streamer URL later, redeploy the admin-ui.
+`CONTRA_WS_URL` is baked into the JS bundle at Docker build time via a `Dockerfile ARG`. Railway passes service variables as build args automatically. The browser connects directly to the streamer over WebSocket, so this URL cannot be proxied through `server.mjs` like the RPC URLs are.
+
+If you change the streamer URL later, redeploy the admin-ui so the new URL is embedded in the bundle. If `CONTRA_WS_URL` is not set, the fallback is `wss://streamer.onlyoncontra.xyz/ws`.
 
 The admin-ui also needs a public domain (**Settings > Networking > Generate Domain**).
 

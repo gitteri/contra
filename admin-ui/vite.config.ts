@@ -8,7 +8,7 @@ export default defineConfig(({ mode }) => {
 
   const contraReadUrl = env.CONTRA_READ_URL || env.CONTRA_RPC_URL || 'https://read-node-production.up.railway.app'
   const contraWriteUrl = env.CONTRA_WRITE_URL || env.CONTRA_RPC_URL || 'https://write-node-production.up.railway.app'
-  const contraWsUrl = env.CONTRA_WS_URL || 'ws://localhost:8902/ws'
+  const contraWsUrl = env.CONTRA_WS_URL || (mode === 'development' ? 'ws://localhost:8902/ws' : '')
 
   // Client code always uses /contra-read and /contra-write (relative paths).
   // In dev: Vite dev server proxies these to the real RPC URLs.
@@ -29,7 +29,7 @@ export default defineConfig(({ mode }) => {
       'process.env.NODE_ENV': JSON.stringify(process.env.NODE_ENV || 'development'),
       'import.meta.env.VITE_CONTRA_READ_URL': JSON.stringify('/contra-read'),
       'import.meta.env.VITE_CONTRA_WRITE_URL': JSON.stringify('/contra-write'),
-      'import.meta.env.VITE_CONTRA_WS_URL': JSON.stringify(contraWsUrl),
+      ...(contraWsUrl ? { 'import.meta.env.VITE_CONTRA_WS_URL': JSON.stringify(contraWsUrl) } : {}),
     },
     server: {
       proxy: {
