@@ -4,13 +4,14 @@ This guide covers deploying Contra to [Railway](https://railway.com) as a multi-
 
 ## Architecture
 
-All services are built from a single Dockerfile that produces four binaries: `node`, `gateway`, `indexer`, and `activity`. Each Railway service runs the same Docker image with a different start command and environment variables.
+All services are built from a single Dockerfile that produces five binaries: `node`, `gateway`, `indexer`, `activity`, and `streamer`. Each Railway service runs the same Docker image with a different start command and environment variables.
 
 | Railway Service | Binary | Role |
 |---|---|---|
 | `write-node` | `node` | Core write node (processes transactions) |
 | `read-node` | `node` | Core read node (serves queries) |
 | `gateway` | `gateway` | Routes requests between write and read nodes |
+| `streamer` | `streamer` | WebSocket server streaming real-time Contra transactions to frontends |
 | `indexer-solana` | `indexer` | Indexes Solana transactions via Yellowstone gRPC |
 | `indexer-contra` | `indexer` | Indexes Contra transactions via RPC polling |
 | `operator-solana` | `indexer` | Processes escrow program operations |
@@ -62,6 +63,7 @@ railway add --service indexer-solana
 railway add --service indexer-contra
 railway add --service operator-solana
 railway add --service operator-contra
+railway add --service streamer
 railway add --service admin-ui
 ```
 
@@ -78,6 +80,7 @@ Set the start command for each service in the Railway dashboard under **Settings
 | `indexer-contra` | `/usr/local/bin/indexer --config /etc/contra/config/railway/indexer-contra.toml -v indexer` |
 | `operator-solana` | `/usr/local/bin/indexer --config /etc/contra/config/railway/operator-solana.toml -v operator` |
 | `operator-contra` | `/usr/local/bin/indexer --config /etc/contra/config/railway/operator-contra.toml -v operator` |
+| `streamer` | `/usr/local/bin/streamer` |
 
 Config files are baked into the Docker image at `/etc/contra/config/` during build.
 
@@ -170,6 +173,22 @@ The `admin-ui` service uses a separate Dockerfile (`admin-ui/Dockerfile`) and mu
 | `ADMIN_PRIVATE_KEY` | Admin private key (base58) |
 | `RUST_LOG` | `info,contra_indexer=debug` |
 
+### streamer
+
+The streamer polls the Contra PostgreSQL database for new blocks/transactions and broadcasts them over WebSocket to connected frontends. It replaces the 4-second RPC polling the admin-ui previously used for the activity feed.
+
+| Variable | Value |
+|---|---|
+| `STREAMER_PORT` | `8902` |
+| `STREAMER_ACCOUNTSDB_CONNECTION_URL` | `postgres://user:pass@host:port/contra` (same DB as read-node) |
+| `STREAMER_POLL_INTERVAL_MS` | `200` (how often to check for new blocks, in ms) |
+| `STREAMER_CORS_ALLOWED_ORIGIN` | `*` |
+| `STREAMER_LOG_LEVEL` | `info` |
+| `STREAMER_JSON_LOGS` | `true` |
+| `RUST_LOG` | `info` |
+
+The streamer needs a **public domain** for the admin-ui (and any other frontend) to connect via WebSocket. Add one via **Settings > Networking > Generate Domain**. The WebSocket endpoint is `wss://<domain>/ws` and a health check is available at `https://<domain>/health`.
+
 ### admin-ui
 
 The admin UI is a static React/Vite app. It connects to Solana RPC directly (via wallet) and to the Contra gateway for L2 operations.
@@ -177,9 +196,10 @@ The admin UI is a static React/Vite app. It connects to Solana RPC directly (via
 | Variable | Value |
 |---|---|
 | `CONTRA_RPC_URL` | Gateway public URL (e.g., `https://gateway-production-xxxx.up.railway.app`) |
+| `CONTRA_WS_URL` | Streamer WebSocket URL (e.g., `wss://streamer-production-xxxx.up.railway.app/ws`) |
 | `PORT` | `3000` |
 
-`CONTRA_RPC_URL` is baked into the static build at build time via `vite.config.ts`. You must set it **before** deploying so it's embedded in the JS bundle. If you change the gateway URL later, redeploy the admin-ui.
+`CONTRA_RPC_URL` and `CONTRA_WS_URL` are baked into the static build at build time via `vite.config.ts`. You must set them **before** deploying so they're embedded in the JS bundle. If you change the gateway or streamer URL later, redeploy the admin-ui.
 
 The admin-ui also needs a public domain (**Settings > Networking > Generate Domain**).
 
@@ -209,6 +229,7 @@ railway service indexer-solana && railway up
 railway service indexer-contra && railway up
 railway service operator-solana && railway up
 railway service operator-contra && railway up
+railway service streamer && railway up
 railway service admin-ui && railway up
 ```
 
@@ -218,7 +239,7 @@ All services build from the same Dockerfile. After the first build, Railway cach
 
 Services communicate over Railway's private network using `<service-name>.railway.internal`. Use Railway's `${{service.RAILWAY_PRIVATE_DOMAIN}}` variable references in the dashboard.
 
-The **gateway** and **admin-ui** need public domains. Add them via **Settings > Networking > Generate Domain** in the Railway dashboard. All other services stay internal-only.
+The **gateway**, **streamer**, and **admin-ui** need public domains. Add them via **Settings > Networking > Generate Domain** in the Railway dashboard. All other services stay internal-only.
 
 ## Post-Deploy: On-Chain Setup
 

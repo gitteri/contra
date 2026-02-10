@@ -1,9 +1,8 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { createSolanaRpc } from '@solana/rpc';
 import { address } from '@solana/addresses';
 import { getBase58Encoder } from '@solana/codecs-strings';
 import type { Signature } from '@solana/keys';
-import { CONTRA_READ_URL } from '../utils/contraRpc';
+import { CONTRA_WS_URL } from '../utils/contraRpc';
 import { useSolana } from './useSolana';
 import type { ActivityTransaction, ActivityStats } from '../types/activity';
 import {
@@ -14,6 +13,10 @@ import {
 
 const MAX_TRANSACTIONS = 150;
 const POLL_INTERVAL_MS = 4000;
+
+/** WebSocket reconnection config */
+const WS_INITIAL_BACKOFF_MS = 500;
+const WS_MAX_BACKOFF_MS = 30_000;
 
 // Discriminator values (byte 0 of instruction data)
 const DISC_CREATE_INSTANCE = 0;
@@ -83,28 +86,19 @@ function parseEscrowInstruction(
 
   try {
     if (disc === DISC_DEPOSIT) {
-      // Deposit: data = [disc(1), amount(8), recipient(option)]
       const decoded = getDepositInstructionDataDecoder().decode(dataBytes);
       amount = decoded.amount.toString();
-
-      // Account indices: payer=0, user=1, instance=2, mint=3
-      from = accountKeys[accountIndices[1]] ?? ''; // user
-      to = accountKeys[accountIndices[2]] ?? '';   // instance (escrow)
+      from = accountKeys[accountIndices[1]] ?? '';
+      to = accountKeys[accountIndices[2]] ?? '';
       mint = accountKeys[accountIndices[3]] ?? '';
     } else if (disc === DISC_RELEASE_FUNDS) {
-      // ReleaseFunds: data = [disc(1), amount(8), user(32), ...]
       const decoded = getReleaseFundsInstructionDataDecoder().decode(dataBytes);
       amount = decoded.amount.toString();
-      to = decoded.user; // user address is in the instruction data
-
-      // Account indices: payer=0, operator=1, instance=2, operatorPda=3, mint=4
-      from = accountKeys[accountIndices[1]] ?? ''; // operator
+      to = decoded.user;
+      from = accountKeys[accountIndices[1]] ?? '';
       mint = accountKeys[accountIndices[4]] ?? '';
     } else {
-      // For other instructions, just get payer and relevant accounts
       from = accountKeys[accountIndices[0]] ?? '';
-
-      // Admin-type instructions: index 1 is typically the subject
       if (accountIndices.length > 1) {
         to = accountKeys[accountIndices[1]] ?? '';
       }
@@ -157,8 +151,10 @@ export function useActivityFeed(instancePubkey: string | null) {
 
   const seenSigs = useRef(new Set<string>());
   const lastSolanaSig = useRef<Signature | undefined>(undefined);
-  const lastContraSlot = useRef<bigint>(0n);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const wsRef = useRef<WebSocket | null>(null);
+  const wsBackoffRef = useRef(WS_INITIAL_BACKOFF_MS);
+  const wsReconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const decimalsCache = useRef<Map<string, number>>(new Map());
   const decimalsFetching = useRef<Set<string>>(new Set());
 
@@ -173,10 +169,8 @@ export function useActivityFeed(instancePubkey: string | null) {
         .send();
 
       if (result?.value?.data) {
-        // data is [base64string, "base64"]
         const b64 = Array.isArray(result.value.data) ? result.value.data[0] : result.value.data;
         const bytes = Uint8Array.from(atob(b64 as string), (c) => c.charCodeAt(0));
-        // SPL Token Mint layout: decimals is at byte offset 44
         if (bytes.length > 44) {
           const dec = bytes[44];
           decimalsCache.current.set(mint, dec);
@@ -226,8 +220,6 @@ export function useActivityFeed(instancePubkey: string | null) {
         let info: ParsedInfo = { type: 'unknown', from: '', to: '', amount: null, mint: null };
 
         try {
-          // Fetch with 'json' encoding -- gives us compiled message format
-          // with accountKeys as string[], instructions with programIdIndex/accounts/data
           const txDetail = await solanaRpc
             .getTransaction(sig.signature, {
               maxSupportedTransactionVersion: 0,
@@ -237,7 +229,6 @@ export function useActivityFeed(instancePubkey: string | null) {
 
           if (txDetail?.transaction?.message) {
             const msg = txDetail.transaction.message;
-            // accountKeys is string[] in json encoding
             const accountKeys: string[] = (msg.accountKeys ?? []).map((k: unknown) =>
               typeof k === 'string' ? k : (k as { pubkey: string }).pubkey ?? String(k)
             );
@@ -246,11 +237,8 @@ export function useActivityFeed(instancePubkey: string | null) {
             const instructions = [...(msg.instructions ?? [])] as any[];
 
             for (const ix of instructions) {
-              // In json encoding: programIdIndex is an index into accountKeys
               const progAddr = accountKeys[ix.programIdIndex];
               if (progAddr === PROGRAM_ID) {
-                // ix.data is base58-encoded instruction data
-                // ix.accounts is number[] of account indices
                 const dataBytes = decodeBase58Data(ix.data ?? '');
                 const ixAccounts: number[] = ix.accounts ?? [];
                 info = parseEscrowInstruction(dataBytes, accountKeys, ixAccounts);
@@ -258,7 +246,6 @@ export function useActivityFeed(instancePubkey: string | null) {
               }
             }
 
-            // If we didn't find our program but have account keys, at least show payer
             if (info.type === 'unknown' && accountKeys.length > 0) {
               info.from = accountKeys[0];
             }
@@ -267,7 +254,6 @@ export function useActivityFeed(instancePubkey: string | null) {
           console.warn('[ActivityFeed] Failed to fetch tx detail:', sig.signature, err);
         }
 
-        // Fetch mint decimals if we haven't seen this mint before
         if (info.mint && !decimalsCache.current.has(info.mint)) {
           fetchMintDecimals(info.mint);
         }
@@ -291,194 +277,120 @@ export function useActivityFeed(instancePubkey: string | null) {
     }
   }, [instancePubkey, solanaRpc, addTransactions, fetchMintDecimals]);
 
-  /**
-   * Parse all transactions from a single block into ActivityTransaction[].
-   * Extracts SPL Token transfers and escrow instructions.
-   */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const parseContraBlock = useCallback((block: any): ActivityTransaction[] => {
-    if (!block?.transactions) return [];
+  // ---------------------------------------------------------------------------
+  // Contra: WebSocket stream from the streamer service
+  // ---------------------------------------------------------------------------
 
-    const blockTime = Number(block.blockTime ?? Math.floor(Date.now() / 1000));
-    const results: ActivityTransaction[] = [];
-
-    for (const txWrap of block.transactions) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const tx = txWrap as any;
-      const sig = tx.transaction?.signatures?.[0];
-      if (!sig || seenSigs.current.has(sig)) continue;
-
-      const msg = tx.transaction?.message;
-      if (!msg) continue;
-
-      const accountKeys: string[] = (msg.accountKeys ?? []).map((k: unknown) =>
-        typeof k === 'string' ? k : (k as { pubkey: string }).pubkey ?? String(k)
-      );
-
-      let txType: ActivityTransaction['type'] = 'unknown';
-      let from = accountKeys[0] ?? '';
-      let to = '';
-      let amount: string | null = null;
-      let mint: string | null = null;
-      const failed = tx.meta?.err != null;
-
-      const instructions = [...(msg.instructions ?? [])];
-      for (const ix of instructions) {
-        const progAddr = accountKeys[ix.programIdIndex];
-
-        // SPL Token Program
-        if (progAddr === 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA') {
-          const dataBytes = decodeBase58Data(ix.data ?? '');
-          if (dataBytes.length === 0) continue;
-
-          const ixDiscrim = dataBytes[0];
-          const ixAccounts: number[] = ix.accounts ?? [];
-
-          // Transfer (disc=3): [source, dest, authority], data: [disc(1), amount(8)]
-          if (ixDiscrim === 3 && dataBytes.length >= 9) {
-            txType = 'transfer';
-            const view = new DataView(dataBytes.buffer, dataBytes.byteOffset);
-            amount = view.getBigUint64(1, true).toString();
-            from = accountKeys[ixAccounts[2]] ?? from;
-            to = accountKeys[ixAccounts[1]] ?? '';
-            if (tx.meta?.preTokenBalances?.length > 0) {
-              mint = tx.meta.preTokenBalances[0].mint ?? null;
-            }
-            break;
-          }
-
-          // TransferChecked (disc=12): [source, mint, dest, authority], data: [disc(1), amount(8), decimals(1)]
-          if (ixDiscrim === 12 && dataBytes.length >= 10) {
-            txType = 'transfer';
-            const view = new DataView(dataBytes.buffer, dataBytes.byteOffset);
-            amount = view.getBigUint64(1, true).toString();
-            from = accountKeys[ixAccounts[3]] ?? from;
-            to = accountKeys[ixAccounts[2]] ?? '';
-            mint = accountKeys[ixAccounts[1]] ?? null;
-            break;
-          }
-        }
-
-        // Escrow program on Contra
-        if (progAddr === PROGRAM_ID) {
-          const dataBytes = decodeBase58Data(ix.data ?? '');
-          const ixAccounts: number[] = ix.accounts ?? [];
-          const info = parseEscrowInstruction(dataBytes, accountKeys, ixAccounts);
-          txType = info.type;
-          from = info.from;
-          to = info.to;
-          amount = info.amount;
-          mint = info.mint;
-          break;
-        }
-      }
-
-      if (mint && !decimalsCache.current.has(mint)) {
-        fetchMintDecimals(mint);
-      }
-
-      results.push({
-        signature: sig,
-        chain: 'contra',
-        type: txType,
-        from,
-        to,
-        amount,
-        mint,
-        timestamp: blockTime,
-        status: failed ? 'failed' : 'confirmed',
-      });
+  const connectContraWs = useCallback(() => {
+    // Close any existing connection
+    if (wsRef.current) {
+      wsRef.current.close();
+      wsRef.current = null;
     }
 
-    return results;
-  }, [fetchMintDecimals]);
+    const ws = new WebSocket(CONTRA_WS_URL);
+    wsRef.current = ws;
 
-  /**
-   * Poll Contra chain by fetching only non-empty slots in the range,
-   * then fetching those blocks in parallel (max 5 concurrent).
-   */
-  const pollContra = useCallback(async () => {
-    try {
-      const contraRpc = createSolanaRpc(CONTRA_READ_URL);
-      const currentSlot = await contraRpc.getSlot({ commitment: 'confirmed' }).send();
+    ws.onopen = () => {
+      console.info('[ActivityFeed] Contra WebSocket connected');
+      wsBackoffRef.current = WS_INITIAL_BACKOFF_MS;
+    };
 
-      // On first poll, start from recent history
-      if (lastContraSlot.current === 0n) {
-        lastContraSlot.current = currentSlot > 5n ? currentSlot - 5n : 0n;
-      }
+    ws.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data as string);
 
-      if (currentSlot <= lastContraSlot.current) return;
+        // The streamer sends StreamedTransaction objects that match ActivityTransaction
+        const tx: ActivityTransaction = {
+          signature: data.signature,
+          chain: (data.chain ?? 'contra') as ActivityTransaction['chain'],
+          type: data.type as ActivityTransaction['type'],
+          from: data.from ?? '',
+          to: data.to ?? '',
+          amount: data.amount ?? null,
+          mint: data.mint ?? null,
+          timestamp: data.timestamp ?? Math.floor(Date.now() / 1000),
+          status: (data.status ?? 'confirmed') as ActivityTransaction['status'],
+        };
 
-      // getBlocks returns only slots that produced blocks (skips empty/dead slots)
-      const startSlot = lastContraSlot.current + 1n;
-      const slots = await contraRpc
-        .getBlocks(startSlot, currentSlot)
-        .send();
-
-      lastContraSlot.current = currentSlot;
-
-      if (!slots || slots.length === 0) return;
-
-      // Cap to most recent 10 slots if we fell behind
-      const slotsToFetch = slots.length > 10 ? slots.slice(-10) : slots;
-
-      // Fetch blocks in parallel (all at once -- they're small on Contra)
-      const blockResults = await Promise.allSettled(
-        slotsToFetch.map((slot) =>
-          contraRpc
-            .getBlock(slot, {
-              encoding: 'json',
-              maxSupportedTransactionVersion: 0,
-              transactionDetails: 'full',
-            })
-            .send()
-        )
-      );
-
-      const newTxs: ActivityTransaction[] = [];
-      for (const result of blockResults) {
-        if (result.status === 'fulfilled' && result.value) {
-          newTxs.push(...parseContraBlock(result.value));
+        // Fetch mint decimals if needed
+        if (tx.mint && !decimalsCache.current.has(tx.mint)) {
+          fetchMintDecimals(tx.mint);
         }
-      }
 
-      if (newTxs.length > 0) addTransactions(newTxs);
-    } catch (err) {
-      console.error('[ActivityFeed] Contra poll error:', err);
+        addTransactions([tx]);
+      } catch (err) {
+        console.warn('[ActivityFeed] Failed to parse WS message:', err);
+      }
+    };
+
+    ws.onclose = (event) => {
+      console.info('[ActivityFeed] Contra WebSocket closed:', event.code, event.reason);
+      wsRef.current = null;
+
+      // Reconnect with exponential backoff
+      const backoff = wsBackoffRef.current;
+      wsBackoffRef.current = Math.min(backoff * 2, WS_MAX_BACKOFF_MS);
+      console.info(`[ActivityFeed] Reconnecting in ${backoff}ms...`);
+      wsReconnectTimer.current = setTimeout(connectContraWs, backoff);
+    };
+
+    ws.onerror = (err) => {
+      console.error('[ActivityFeed] Contra WebSocket error:', err);
+      // onclose will fire after onerror, which handles reconnection
+    };
+  }, [addTransactions, fetchMintDecimals]);
+
+  const disconnectContraWs = useCallback(() => {
+    if (wsReconnectTimer.current) {
+      clearTimeout(wsReconnectTimer.current);
+      wsReconnectTimer.current = null;
     }
-  }, [addTransactions, parseContraBlock]);
+    if (wsRef.current) {
+      wsRef.current.close();
+      wsRef.current = null;
+    }
+    wsBackoffRef.current = WS_INITIAL_BACKOFF_MS;
+  }, []);
+
+  // ---------------------------------------------------------------------------
+  // Start / Stop
+  // ---------------------------------------------------------------------------
 
   const start = useCallback(() => {
     if (intervalRef.current) return;
     setIsPolling(true);
 
+    // Solana: poll on interval
     pollSolana();
-    pollContra();
+    intervalRef.current = setInterval(pollSolana, POLL_INTERVAL_MS);
 
-    intervalRef.current = setInterval(() => {
-      pollSolana();
-      pollContra();
-    }, POLL_INTERVAL_MS);
-  }, [pollSolana, pollContra]);
+    // Contra: connect WebSocket stream
+    connectContraWs();
+  }, [pollSolana, connectContraWs]);
 
   const stop = useCallback(() => {
     if (intervalRef.current) {
       clearInterval(intervalRef.current);
       intervalRef.current = null;
     }
+    disconnectContraWs();
     setIsPolling(false);
-  }, []);
+  }, [disconnectContraWs]);
 
+  // Cleanup on unmount
   useEffect(() => {
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current);
+      disconnectContraWs();
     };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Reset when instancePubkey changes
   useEffect(() => {
     seenSigs.current.clear();
     lastSolanaSig.current = undefined;
-    lastContraSlot.current = 0n;
     setTransactions([]);
     setStats(computeStats([]));
 

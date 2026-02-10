@@ -7,6 +7,12 @@ function normalizeUrl(raw: string, fallback: string): string {
   return `https://${url}`;
 }
 
+function normalizeWsUrl(raw: string, fallback: string): string {
+  const url = raw || fallback;
+  if (url.startsWith('ws://') || url.startsWith('wss://')) return url;
+  return `wss://${url}`;
+}
+
 /** Contra chain read endpoint (balance queries, tx lookups, polling). */
 export const CONTRA_READ_URL = normalizeUrl(
   import.meta.env.VITE_CONTRA_READ_URL,
@@ -17,6 +23,12 @@ export const CONTRA_READ_URL = normalizeUrl(
 export const CONTRA_WRITE_URL = normalizeUrl(
   import.meta.env.VITE_CONTRA_WRITE_URL,
   'https://write.onlyoncontra.xyz'
+);
+
+/** Contra streamer WebSocket endpoint (real-time transaction stream). */
+export const CONTRA_WS_URL = normalizeWsUrl(
+  import.meta.env.VITE_CONTRA_WS_URL,
+  'wss://streamer.onlyoncontra.xyz/ws'
 );
 
 /** Pre-built RPC client for reading from Contra. */
