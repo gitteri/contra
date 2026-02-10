@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { address } from '@solana/addresses';
 import { getBase58Encoder } from '@solana/codecs-strings';
 import type { Signature } from '@solana/keys';
-import { CONTRA_WS_URL } from '../utils/contraRpc';
+import { CONTRA_WS_URL, contraReadRpc } from '../utils/contraRpc';
 import { useSolana } from './useSolana';
 import type { ActivityTransaction, ActivityStats } from '../types/activity';
 import {
@@ -158,13 +158,19 @@ export function useActivityFeed(instancePubkey: string | null) {
   const decimalsCache = useRef<Map<string, number>>(new Map());
   const decimalsFetching = useRef<Set<string>>(new Set());
 
-  /** Fetch and cache decimals for a mint. SPL Token mint layout: decimals is a u8 at byte offset 44. */
-  const fetchMintDecimals = useCallback(async (mint: string) => {
+  /**
+   * Fetch and cache decimals for a mint.
+   * SPL Token mint layout: decimals is a u8 at byte offset 44.
+   * For Contra-chain transactions the mint lives on Contra, so we query contraReadRpc.
+   * For Solana-chain transactions we query the Solana RPC.
+   */
+  const fetchMintDecimals = useCallback(async (mint: string, chain: 'solana' | 'contra' = 'solana') => {
     if (decimalsCache.current.has(mint) || decimalsFetching.current.has(mint)) return;
     decimalsFetching.current.add(mint);
 
     try {
-      const result = await solanaRpc
+      const rpc = chain === 'contra' ? contraReadRpc : solanaRpc;
+      const result = await rpc
         .getAccountInfo(address(mint), { encoding: 'base64' })
         .send();
 
@@ -178,7 +184,7 @@ export function useActivityFeed(instancePubkey: string | null) {
         }
       }
     } catch (err) {
-      console.warn('[ActivityFeed] Failed to fetch decimals for', mint, err);
+      console.warn('[ActivityFeed] Failed to fetch decimals for', mint, `(${chain})`, err);
     } finally {
       decimalsFetching.current.delete(mint);
     }
@@ -313,9 +319,9 @@ export function useActivityFeed(instancePubkey: string | null) {
           status: (data.status ?? 'confirmed') as ActivityTransaction['status'],
         };
 
-        // Fetch mint decimals if needed
+        // Fetch mint decimals from the Contra chain (where the mint lives)
         if (tx.mint && !decimalsCache.current.has(tx.mint)) {
-          fetchMintDecimals(tx.mint);
+          fetchMintDecimals(tx.mint, 'contra');
         }
 
         addTransactions([tx]);

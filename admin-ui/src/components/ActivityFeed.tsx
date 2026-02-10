@@ -1,4 +1,5 @@
 import type { ActivityTransaction } from '../types/activity';
+import { CONTRA_READ_URL } from '../utils/contraRpc';
 
 interface ActivityFeedProps {
   transactions: ActivityTransaction[];
@@ -117,7 +118,7 @@ export function ActivityFeed({ transactions, mintDecimals }: ActivityFeedProps) 
                 href={
                   tx.chain === 'solana'
                     ? `https://explorer.solana.com/tx/${tx.signature}?cluster=devnet`
-                    : `#${tx.signature}`
+                    : `https://explorer.solana.com/tx/${tx.signature}?cluster=custom&customUrl=${encodeURIComponent(CONTRA_READ_URL)}`
                 }
                 target="_blank"
                 rel="noopener noreferrer"
