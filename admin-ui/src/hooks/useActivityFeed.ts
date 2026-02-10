@@ -110,42 +110,60 @@ function parseEscrowInstruction(
   return { type: txType, from, to, amount, mint };
 }
 
-function computeStats(txs: ActivityTransaction[]): ActivityStats {
-  const wallets = new Set<string>();
-  let deposits = 0;
-  let releases = 0;
-  let transfers = 0;
-  let otherActions = 0;
+const EMPTY_STATS: ActivityStats = {
+  totalTransactions: 0,
+  deposits: 0,
+  releases: 0,
+  transfers: 0,
+  otherActions: 0,
+  uniqueWallets: 0,
+  recentThroughput: 0,
+};
 
-  for (const tx of txs) {
-    if (tx.from) wallets.add(tx.from);
-    if (tx.to) wallets.add(tx.to);
+/** Incrementally update running stats with new transactions. */
+function accumulateStats(
+  prev: ActivityStats,
+  incoming: ActivityTransaction[],
+  walletSet: Set<string>,
+  recentTimestamps: number[],
+): ActivityStats {
+  let { totalTransactions, deposits, releases, transfers, otherActions } = prev;
+
+  const now = Math.floor(Date.now() / 1000);
+
+  for (const tx of incoming) {
+    totalTransactions++;
+    if (tx.from) walletSet.add(tx.from);
+    if (tx.to) walletSet.add(tx.to);
     switch (tx.type) {
       case 'deposit':   deposits++;   break;
       case 'release':   releases++;   break;
       case 'transfer':  transfers++;  break;
       default:          otherActions++; break;
     }
+    recentTimestamps.push(tx.timestamp);
   }
 
-  const now = Math.floor(Date.now() / 1000);
-  const recentThroughput = txs.filter((t) => now - t.timestamp < 60).length;
+  // Prune timestamps older than 60s for throughput calculation
+  while (recentTimestamps.length > 0 && now - recentTimestamps[0] > 60) {
+    recentTimestamps.shift();
+  }
 
   return {
-    totalTransactions: txs.length,
+    totalTransactions,
     deposits,
     releases,
     transfers,
     otherActions,
-    uniqueWallets: wallets.size,
-    recentThroughput,
+    uniqueWallets: walletSet.size,
+    recentThroughput: recentTimestamps.length,
   };
 }
 
 export function useActivityFeed(instancePubkey: string | null) {
   const { rpc: solanaRpc } = useSolana();
   const [transactions, setTransactions] = useState<ActivityTransaction[]>([]);
-  const [stats, setStats] = useState<ActivityStats>(computeStats([]));
+  const [stats, setStats] = useState<ActivityStats>(EMPTY_STATS);
   const [isPolling, setIsPolling] = useState(false);
   const [mintDecimals, setMintDecimals] = useState<Record<string, number>>({});
 
@@ -157,6 +175,10 @@ export function useActivityFeed(instancePubkey: string | null) {
   const wsReconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const decimalsCache = useRef<Map<string, number>>(new Map());
   const decimalsFetching = useRef<Set<string>>(new Set());
+  // Running stats state (not capped by the 150-tx display buffer)
+  const statsRef = useRef<ActivityStats>(EMPTY_STATS);
+  const walletSetRef = useRef(new Set<string>());
+  const recentTimestampsRef = useRef<number[]>([]);
 
   /**
    * Fetch and cache decimals for a mint.
@@ -196,8 +218,17 @@ export function useActivityFeed(instancePubkey: string | null) {
       if (novel.length === 0) return prev;
 
       for (const t of novel) seenSigs.current.add(t.signature);
+
+      // Update running stats (not bounded by display buffer)
+      statsRef.current = accumulateStats(
+        statsRef.current,
+        novel,
+        walletSetRef.current,
+        recentTimestampsRef.current,
+      );
+      setStats({ ...statsRef.current });
+
       const merged = [...novel, ...prev].slice(0, MAX_TRANSACTIONS);
-      setStats(computeStats(merged));
       return merged;
     });
   }, []);
@@ -384,6 +415,18 @@ export function useActivityFeed(instancePubkey: string | null) {
     setIsPolling(false);
   }, [disconnectContraWs]);
 
+  // Refresh throughput counter every 5s so "TX / min" decays when traffic stops
+  useEffect(() => {
+    const id = setInterval(() => {
+      const now = Math.floor(Date.now() / 1000);
+      const ts = recentTimestampsRef.current;
+      while (ts.length > 0 && now - ts[0] > 60) ts.shift();
+      statsRef.current = { ...statsRef.current, recentThroughput: ts.length };
+      setStats({ ...statsRef.current });
+    }, 5000);
+    return () => clearInterval(id);
+  }, []);
+
   // Cleanup on unmount
   useEffect(() => {
     return () => {
@@ -397,8 +440,11 @@ export function useActivityFeed(instancePubkey: string | null) {
   useEffect(() => {
     seenSigs.current.clear();
     lastSolanaSig.current = undefined;
+    statsRef.current = EMPTY_STATS;
+    walletSetRef.current.clear();
+    recentTimestampsRef.current = [];
     setTransactions([]);
-    setStats(computeStats([]));
+    setStats(EMPTY_STATS);
 
     if (intervalRef.current) {
       stop();
