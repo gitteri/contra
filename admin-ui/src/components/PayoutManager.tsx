@@ -264,7 +264,7 @@ function PayoutContent({ account, network }: PayoutContentProps) {
         <h3>Token Mint</h3>
         <div className="form-group">
           <label>Mint Address (used for all rows without a mint column)</label>
-          <input
+          <input autoComplete="off" data-1p-ignore
             type="text"
             value={mintAddress}
             onChange={(e) => setMintAddress(e.target.value)}
@@ -307,7 +307,7 @@ function PayoutContent({ account, network }: PayoutContentProps) {
           <span className="csv-dropzone-text">
             Drop a CSV file here, or click to browse
           </span>
-          <input
+          <input autoComplete="off" data-1p-ignore
             ref={fileInputRef}
             type="file"
             accept=".csv,.tsv,.txt"
@@ -318,7 +318,7 @@ function PayoutContent({ account, network }: PayoutContentProps) {
 
         <div className="form-group" style={{ marginTop: 'var(--space-3)' }}>
           <label>Or paste CSV content</label>
-          <textarea
+          <textarea autoComplete="off" data-1p-ignore
             value={csvText}
             onChange={(e) => handleCsvInput(e.target.value)}
             placeholder={"address, amount\nAbc123...xyz, 1000000\nDef456...uvw, 2000000"}
@@ -362,7 +362,7 @@ function PayoutContent({ account, network }: PayoutContentProps) {
           {/* Batch size control */}
           <div className="form-group" style={{ marginTop: 'var(--space-4)' }}>
             <label>Concurrent batch size</label>
-            <input
+            <input autoComplete="off" data-1p-ignore
               type="number"
               value={batchSize}
               onChange={(e) => setBatchSize(Math.max(1, Math.min(10, parseInt(e.target.value) || 1)))}

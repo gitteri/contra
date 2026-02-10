@@ -222,7 +222,7 @@ export function InstanceManager({ onInstanceSelect }: InstanceManagerProps) {
       <div className="form-group">
         <label>Instance Address</label>
         <div className="input-group">
-          <input
+          <input autoComplete="off" data-1p-ignore
             type="text"
             value={instanceAddress}
             onChange={(e) => setInstanceAddress(e.target.value)}

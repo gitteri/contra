@@ -224,7 +224,7 @@ function OperatorFunctionsContent({ instancePubkey, account, network }: Operator
         <h3>Release Funds</h3>
         <div className="form-group">
           <label>Mint Address</label>
-          <input
+          <input autoComplete="off" data-1p-ignore
             type="text"
             value={mintAddress}
             onChange={(e) => setMintAddress(e.target.value)}
@@ -251,7 +251,7 @@ function OperatorFunctionsContent({ instancePubkey, account, network }: Operator
         </div>
         <div className="form-group">
           <label>User Address</label>
-          <input
+          <input autoComplete="off" data-1p-ignore
             type="text"
             value={userAddress}
             onChange={(e) => setUserAddress(e.target.value)}
@@ -261,7 +261,7 @@ function OperatorFunctionsContent({ instancePubkey, account, network }: Operator
         </div>
         <div className="form-group">
           <label>Amount</label>
-          <input
+          <input autoComplete="off" data-1p-ignore
             type="number"
             value={amount}
             onChange={(e) => setAmount(e.target.value)}
@@ -271,7 +271,7 @@ function OperatorFunctionsContent({ instancePubkey, account, network }: Operator
         </div>
         <div className="form-group">
           <label>New Withdrawal Root (32 bytes hex)</label>
-          <input
+          <input autoComplete="off" data-1p-ignore
             type="text"
             value={newWithdrawalRoot}
             onChange={(e) => setNewWithdrawalRoot(e.target.value)}
@@ -281,7 +281,7 @@ function OperatorFunctionsContent({ instancePubkey, account, network }: Operator
         </div>
         <div className="form-group">
           <label>Transaction Nonce</label>
-          <input
+          <input autoComplete="off" data-1p-ignore
             type="number"
             value={transactionNonce}
             onChange={(e) => setTransactionNonce(e.target.value)}
@@ -291,7 +291,7 @@ function OperatorFunctionsContent({ instancePubkey, account, network }: Operator
         </div>
         <div className="form-group">
           <label>Sibling Proofs (512 bytes hex)</label>
-          <textarea
+          <textarea autoComplete="off" data-1p-ignore
             value={siblingProofs}
             onChange={(e) => setSiblingProofs(e.target.value)}
             placeholder="0x..."

@@ -184,7 +184,7 @@ function MintTokensSection({
 
       <div className="form-group">
         <label>Recipient Address</label>
-        <input
+        <input autoComplete="off" data-1p-ignore
           type="text"
           value={mintToAddress}
           onChange={(e) => setMintToAddress(e.target.value)}
@@ -195,7 +195,7 @@ function MintTokensSection({
 
       <div className="form-group">
         <label>Amount (UI Amount)</label>
-        <input
+        <input autoComplete="off" data-1p-ignore
           type="text"
           value={mintAmount}
           onChange={(e) => setMintAmount(e.target.value)}
@@ -454,7 +454,7 @@ export function MintManager() {
 
       <div className="function-section">
         <div className="input-group">
-          <input
+          <input autoComplete="off" data-1p-ignore
             type="text"
             value={mintAddress}
             onChange={(e) => setMintAddress(e.target.value)}

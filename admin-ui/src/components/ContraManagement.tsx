@@ -141,7 +141,7 @@ function WithdrawSection({
       <div className="form-group">
         <label>Amount (in smallest units)</label>
         <div className="input-group">
-          <input
+          <input autoComplete="off" data-1p-ignore
             type="text"
             value={withdrawAmount}
             onChange={(e) => setWithdrawAmount(e.target.value)}
@@ -159,7 +159,7 @@ function WithdrawSection({
       </div>
       <div className="form-group">
         <label>Destination (optional)</label>
-        <input
+        <input autoComplete="off" data-1p-ignore
           type="text"
           value={withdrawDestination}
           onChange={(e) => setWithdrawDestination(e.target.value)}
@@ -331,7 +331,7 @@ function TransferSection({
       )}
       <div className="form-group">
         <label>Recipient Address</label>
-        <input
+        <input autoComplete="off" data-1p-ignore
           type="text"
           value={recipientAddress}
           onChange={(e) => setRecipientAddress(e.target.value)}
@@ -342,7 +342,7 @@ function TransferSection({
       <div className="form-group">
         <label>Amount (in smallest units)</label>
         <div className="input-group">
-          <input
+          <input autoComplete="off" data-1p-ignore
             type="text"
             value={transferAmount}
             onChange={(e) => setTransferAmount(e.target.value)}
@@ -480,7 +480,7 @@ export function ContraManagement() {
         </p>
         <div className="form-group">
           <label>Token Mint Address</label>
-          <input
+          <input autoComplete="off" data-1p-ignore
             type="text"
             value={mintAddress}
             onChange={(e) => setMintAddress(e.target.value)}

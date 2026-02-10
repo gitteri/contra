@@ -27,21 +27,22 @@ RUN pnpm install --frozen-lockfile
 RUN ln -s /app/admin-ui/node_modules /app/contra-escrow-program/clients/typescript/node_modules && \
     ln -s /app/admin-ui/node_modules /app/contra-withdraw-program/clients/typescript/node_modules
 
-ARG CONTRA_READ_URL
-ARG CONTRA_WRITE_URL
-ENV CONTRA_READ_URL=${CONTRA_READ_URL}
-ENV CONTRA_WRITE_URL=${CONTRA_WRITE_URL}
+# Client code uses /contra-read and /contra-write (relative paths).
+# The production server.mjs proxies these to the real RPC URLs at runtime.
+# No RPC URLs need to be baked into the build.
 RUN pnpm build
 
-# Serve with a lightweight static server
+# Production: lightweight server that serves static files + proxies RPC
 FROM node:24-alpine
 
-RUN npm install -g serve@latest
-
 COPY --from=builder /app/admin-ui/dist /app/dist
+COPY --from=builder /app/admin-ui/server.mjs /app/server.mjs
 
 WORKDIR /app
 
 EXPOSE 3000
 
-CMD ["serve", "-s", "dist", "-l", "3000"]
+# Set RPC URLs via Railway service variables at runtime:
+#   CONTRA_READ_URL=https://read-node-production.up.railway.app
+#   CONTRA_WRITE_URL=https://write-node-production.up.railway.app
+CMD ["node", "server.mjs"]

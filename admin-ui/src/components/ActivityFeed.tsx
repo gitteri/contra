@@ -2,6 +2,7 @@ import type { ActivityTransaction } from '../types/activity';
 
 interface ActivityFeedProps {
   transactions: ActivityTransaction[];
+  mintDecimals: Record<string, number>;
 }
 
 const TYPE_LABELS: Record<ActivityTransaction['type'], string> = {
@@ -35,7 +36,7 @@ const TYPE_CLASSES: Record<string, string> = {
 };
 
 function truncateAddr(addr: string): string {
-  if (!addr || addr.length < 12) return addr || '---';
+  if (!addr || addr.length < 12) return addr || '';
   return `${addr.slice(0, 4)}...${addr.slice(-4)}`;
 }
 
@@ -44,7 +45,26 @@ function formatTimestamp(ts: number): string {
   return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
-export function ActivityFeed({ transactions }: ActivityFeedProps) {
+/** Format a raw token amount using mint decimals. */
+function formatAmount(raw: string, decimals?: number): string {
+  try {
+    if (decimals !== undefined && decimals > 0) {
+      const n = BigInt(raw);
+      const divisor = 10n ** BigInt(decimals);
+      const whole = n / divisor;
+      const frac = n % divisor;
+      const fracStr = frac.toString().padStart(decimals, '0').replace(/0+$/, '');
+      return fracStr
+        ? `${whole.toLocaleString()}.${fracStr}`
+        : whole.toLocaleString();
+    }
+    return BigInt(raw).toLocaleString();
+  } catch {
+    return raw;
+  }
+}
+
+export function ActivityFeed({ transactions, mintDecimals }: ActivityFeedProps) {
   return (
     <div className="card activity-feed-card">
       <h2>Live Activity</h2>
@@ -78,7 +98,16 @@ export function ActivityFeed({ transactions }: ActivityFeedProps) {
                   {truncateAddr(tx.to)}
                 </span>
               )}
-              {tx.amount && <span className="activity-amount">{tx.amount}</span>}
+              {tx.amount && (
+                <span className="activity-amount">
+                  {formatAmount(tx.amount, tx.mint ? mintDecimals[tx.mint] : undefined)}
+                </span>
+              )}
+              {tx.mint && (
+                <span className="activity-mint" title={tx.mint}>
+                  {truncateAddr(tx.mint)}
+                </span>
+              )}
             </div>
 
             <div className="activity-row-right">

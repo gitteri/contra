@@ -30,7 +30,7 @@ function AppContent() {
   const [activeTab, setActiveTab] = useLocalStorage<TabType>("activeTab", "escrow");
   const [escrowSection, setEscrowSection] = useLocalStorage<EscrowSection>("escrowSection", "admin");
 
-  const { transactions, stats, isPolling, start, stop } = useActivityFeed(
+  const { transactions, stats, isPolling, start, stop, mintDecimals } = useActivityFeed(
     instancePubkey || null
   );
 
@@ -169,7 +169,7 @@ function AppContent() {
                   onStop={stop}
                   instancePubkey={instancePubkey || null}
                 />
-                <ActivityFeed transactions={transactions} />
+                <ActivityFeed transactions={transactions} mintDecimals={mintDecimals} />
               </div>
 
               {/* Payout tab */}

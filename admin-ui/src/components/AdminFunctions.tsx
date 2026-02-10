@@ -395,7 +395,7 @@ function AdminFunctionsContent({ instancePubkey, account, network }: AdminFuncti
         <h3>Mint Management</h3>
         <div className="form-group">
           <label>Mint Address</label>
-          <input
+          <input autoComplete="off" data-1p-ignore
             type="text"
             value={mintAddress}
             onChange={(e) => setMintAddress(e.target.value)}
@@ -442,7 +442,7 @@ function AdminFunctionsContent({ instancePubkey, account, network }: AdminFuncti
         <h3>Operator Management</h3>
         <div className="form-group">
           <label>Operator Address</label>
-          <input
+          <input autoComplete="off" data-1p-ignore
             type="text"
             value={operatorAddress}
             onChange={(e) => setOperatorAddress(e.target.value)}
@@ -472,7 +472,7 @@ function AdminFunctionsContent({ instancePubkey, account, network }: AdminFuncti
         <h3>Admin Transfer</h3>
         <div className="form-group">
           <label>New Admin Address</label>
-          <input
+          <input autoComplete="off" data-1p-ignore
             type="text"
             value={newAdminAddress}
             onChange={(e) => setNewAdminAddress(e.target.value)}
@@ -494,7 +494,7 @@ function AdminFunctionsContent({ instancePubkey, account, network }: AdminFuncti
         <p className="info-text">Create a new SPL token mint for testing purposes. You will be set as the mint authority and freeze authority.</p>
         <div className="form-group">
           <label>Decimals</label>
-          <input
+          <input autoComplete="off" data-1p-ignore
             type="number"
             value={newMintDecimals}
             onChange={(e) => setNewMintDecimals(Math.max(0, Math.min(9, parseInt(e.target.value) || 0)))}

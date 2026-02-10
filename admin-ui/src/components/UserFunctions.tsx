@@ -122,7 +122,7 @@ function DepositSection({
       </p>
       <div className="form-group">
         <label>Mint Address</label>
-        <input
+        <input autoComplete="off" data-1p-ignore
           type="text"
           value={depositMintAddress}
           onChange={(e) => setDepositMintAddress(e.target.value)}
@@ -149,7 +149,7 @@ function DepositSection({
       </div>
       <div className="form-group">
         <label>Amount</label>
-        <input
+        <input autoComplete="off" data-1p-ignore
           type="number"
           value={depositAmount}
           onChange={(e) => setDepositAmount(e.target.value)}
@@ -159,7 +159,7 @@ function DepositSection({
       </div>
       <div className="form-group">
         <label>Recipient (optional)</label>
-        <input
+        <input autoComplete="off" data-1p-ignore
           type="text"
           value={recipientAddress}
           onChange={(e) => setRecipientAddress(e.target.value)}
@@ -269,7 +269,7 @@ function WithdrawSection({
       </p>
       <div className="form-group">
         <label>Mint Address</label>
-        <input
+        <input autoComplete="off" data-1p-ignore
           type="text"
           value={withdrawMintAddress}
           onChange={(e) => setWithdrawMintAddress(e.target.value)}
@@ -296,7 +296,7 @@ function WithdrawSection({
       </div>
       <div className="form-group">
         <label>Amount</label>
-        <input
+        <input autoComplete="off" data-1p-ignore
           type="number"
           value={withdrawAmount}
           onChange={(e) => setWithdrawAmount(e.target.value)}
@@ -306,7 +306,7 @@ function WithdrawSection({
       </div>
       <div className="form-group">
         <label>Destination (optional)</label>
-        <input
+        <input autoComplete="off" data-1p-ignore
           type="text"
           value={withdrawDestination}
           onChange={(e) => setWithdrawDestination(e.target.value)}

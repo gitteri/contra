@@ -6,13 +6,13 @@ import path from 'path'
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
 
-  const contraReadUrl = env.CONTRA_READ_URL || env.CONTRA_RPC_URL || 'https://read.onlyoncontra.xyz'
-  const contraWriteUrl = env.CONTRA_WRITE_URL || env.CONTRA_RPC_URL || 'https://write.onlyoncontra.xyz'
+  const contraReadUrl = env.CONTRA_READ_URL || env.CONTRA_RPC_URL || 'https://read-node-production.up.railway.app'
+  const contraWriteUrl = env.CONTRA_WRITE_URL || env.CONTRA_RPC_URL || 'https://write-node-production.up.railway.app'
 
-  // In dev mode, proxy Contra RPC requests to avoid CORS issues.
-  // The app code will hit /contra-read and /contra-write instead of the
-  // real URLs, and vite's proxy forwards them with proper headers.
-  const isDev = mode === 'development'
+  // Client code always uses /contra-read and /contra-write (relative paths).
+  // In dev: Vite dev server proxies these to the real RPC URLs.
+  // In prod: server.mjs (Express) proxies these to the real RPC URLs.
+  // This avoids CORS entirely since the browser only talks to its own origin.
 
   return {
     plugins: [react()],
@@ -26,13 +26,8 @@ export default defineConfig(({ mode }) => {
       global: 'globalThis',
       'process.env': {},
       'process.env.NODE_ENV': JSON.stringify(process.env.NODE_ENV || 'development'),
-      // In dev, point at the local proxy paths; in production, use the real URLs.
-      'import.meta.env.VITE_CONTRA_READ_URL': JSON.stringify(
-        isDev ? '/contra-read' : contraReadUrl
-      ),
-      'import.meta.env.VITE_CONTRA_WRITE_URL': JSON.stringify(
-        isDev ? '/contra-write' : contraWriteUrl
-      ),
+      'import.meta.env.VITE_CONTRA_READ_URL': JSON.stringify('/contra-read'),
+      'import.meta.env.VITE_CONTRA_WRITE_URL': JSON.stringify('/contra-write'),
     },
     server: {
       proxy: {

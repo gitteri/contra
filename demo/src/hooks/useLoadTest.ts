@@ -105,8 +105,8 @@ export const useLoadTest = () => {
 
   const pollConfirmation = useCallback(
     async (txId: string, signature: string, senderPubkey: string, receiverAddress: string) => {
-      const maxPolls = 50;
-      const pollInterval = 100;
+      const maxPolls = 20;
+      const pollInterval = 1000;
 
       for (let pollCount = 1; pollCount <= maxPolls; pollCount++) {
         if (!testStateRef.current.isRunning) break;
@@ -136,12 +136,16 @@ export const useLoadTest = () => {
         await new Promise((resolve) => setTimeout(resolve, pollInterval));
       }
 
-      // Failed to confirm
+      // Failed to confirm after all polls exhausted
       setTransactions((prev) =>
         prev.map((tx) =>
           tx.id === txId ? { ...tx, status: "failed", pollCount: maxPolls } : tx
         )
       );
+      setStatistics((prev) => ({
+        ...prev,
+        failedTransactions: prev.failedTransactions + 1,
+      }));
     },
     [updateWalletBalance]
   );

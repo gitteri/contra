@@ -76,7 +76,7 @@ export function StatusChecker({ instancePubkey }: StatusCheckerProps) {
       <div className="function-section">
         <h3>Check Mint Status</h3>
         <div className="input-group">
-          <input
+          <input autoComplete="off" data-1p-ignore
             type="text"
             value={mintToCheck}
             onChange={(e) => setMintToCheck(e.target.value)}
@@ -104,7 +104,7 @@ export function StatusChecker({ instancePubkey }: StatusCheckerProps) {
       <div className="function-section">
         <h3>Check Operator Status</h3>
         <div className="input-group">
-          <input
+          <input autoComplete="off" data-1p-ignore
             type="text"
             value={operatorToCheck}
             onChange={(e) => setOperatorToCheck(e.target.value)}
