@@ -513,8 +513,10 @@ async fn main() {
 
     info!("Connected to accounts database");
 
-    // Broadcast channel — 4096 buffered messages before lagging
-    let (tx_sender, _) = broadcast::channel::<String>(4096);
+    // Broadcast channel — 4096 buffered messages before lagging.
+    // Keep _keep_alive so the channel never transitions to "closed"
+    // (which would happen if all receivers are dropped).
+    let (tx_sender, _keep_alive) = broadcast::channel::<String>(4096);
 
     // Spawn the poller
     let poll_interval = Duration::from_millis(args.poll_interval_ms);
