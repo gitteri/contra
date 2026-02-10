@@ -67,8 +67,8 @@ struct StreamedTransaction {
 )]
 struct Args {
     /// Port to listen on
-    #[arg(short, long, default_value_t = 8902, env = "STREAMER_PORT")]
-    port: u16,
+    #[arg(short, long, env = "PORT")]
+    port: Option<u16>,
 
     /// PostgreSQL connection URL (read replica)
     #[arg(long, env = "STREAMER_ACCOUNTSDB_CONNECTION_URL")]
@@ -513,6 +513,14 @@ async fn main() {
     let args = Args::parse();
     init_logging(&args.log_level, args.json_logs);
 
+    // Port resolution: --port flag / PORT env (clap) -> STREAMER_PORT env -> 8902
+    let port = args.port.unwrap_or_else(|| {
+        std::env::var("STREAMER_PORT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(8902)
+    });
+
     info!("Starting Contra streamer v{}", env!("CARGO_PKG_VERSION"));
 
     // Connect to the read replica
@@ -549,7 +557,7 @@ async fn main() {
         .layer(cors)
         .with_state(state);
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], args.port));
+    let addr = SocketAddr::from(([0, 0, 0, 0], port));
     info!("Listening on {}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr)
