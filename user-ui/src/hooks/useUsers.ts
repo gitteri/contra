@@ -115,24 +115,123 @@ export function useUsers() {
   const handleWebSocketTransaction = useCallback((tx: ContraTransaction) => {
     console.log('[useUsers] Received transaction:', tx);
 
-    // Check if transaction involves any of our users
+    // Get all relevant addresses
     const userAddresses = users.map(u => u.wallet.publicKey);
+    const adminAddress = getAdminAddress();
+    const escrowAddress = import.meta.env.VITE_INSTANCE_ADDRESS as string;
 
-    if (userAddresses.includes(tx.from) || userAddresses.includes(tx.to)) {
-      // Refetch balances for affected users
+    // Check if transaction involves escrow or any of our users
+    const isEscrowTransaction = tx.from === escrowAddress || tx.to === escrowAddress;
+    const involvesUser = userAddresses.includes(tx.from) || userAddresses.includes(tx.to);
+    const involvesAdmin = adminAddress && (tx.from === adminAddress || tx.to === adminAddress);
+
+    if (isEscrowTransaction || involvesUser || involvesAdmin) {
+      // Refetch balances for affected parties
       refetchBalances();
 
-      // Add to network animation
-      const amount = tx.amount ? parseFloat(tx.amount) : 0;
-      addNetworkTransaction({
-        id: tx.signature,
-        from: tx.from,
-        to: tx.to,
-        amount,
-        timestamp: Date.now(),
-      });
+      // Parse amount from string (it's in lamports)
+      const amount = tx.amount ? parseFloat(tx.amount) / 1e9 : 0; // Convert from lamports to tokens
+
+      // Determine the proper routing for network animation
+      let networkTx: NetworkTransaction | null = null;
+
+      if (tx.type === 'deposit') {
+        // Escrow deposit: Show mainnet → escrow → user
+        if (tx.to === escrowAddress) {
+          // First leg: from mainnet to escrow
+          addNetworkTransaction({
+            id: `${tx.signature}-deposit-1`,
+            from: 'offscreen-left',
+            to: 'escrow',
+            amount,
+            timestamp: performance.now(),
+          });
+
+          // Find the recipient user (if it's for a specific user)
+          const recipientUser = users.find(u => tx.from === u.wallet.publicKey);
+          if (recipientUser) {
+            // Second leg: from escrow to user (delayed)
+            setTimeout(() => {
+              addNetworkTransaction({
+                id: `${tx.signature}-deposit-2`,
+                from: 'escrow',
+                to: recipientUser.id,
+                amount,
+                timestamp: performance.now(),
+              });
+            }, 1500);
+          }
+        }
+      } else if (tx.type === 'release_funds') {
+        // Payout from escrow to user
+        const recipientUser = users.find(u => tx.to === u.wallet.publicKey);
+        if (recipientUser) {
+          networkTx = {
+            id: tx.signature,
+            from: 'escrow',
+            to: recipientUser.id,
+            amount,
+            timestamp: performance.now(),
+          };
+        }
+      } else if (tx.type === 'transfer') {
+        // Regular transfer between users or withdrawals
+        if (tx.from === escrowAddress && !involvesUser) {
+          // Withdrawal from escrow to mainnet
+          networkTx = {
+            id: tx.signature,
+            from: 'escrow',
+            to: 'offscreen-left',
+            amount,
+            timestamp: performance.now(),
+          };
+        } else {
+          // Map addresses to user IDs or special nodes
+          let fromId = tx.from;
+          let toId = tx.to;
+
+          // Map user addresses to their IDs
+          const fromUser = users.find(u => u.wallet.publicKey === tx.from);
+          if (fromUser) fromId = fromUser.id;
+
+          const toUser = users.find(u => u.wallet.publicKey === tx.to);
+          if (toUser) toId = toUser.id;
+
+          // Map admin address
+          if (adminAddress) {
+            if (tx.from === adminAddress) fromId = 'admin';
+            if (tx.to === adminAddress) toId = 'admin';
+          }
+
+          // Map escrow address
+          if (tx.from === escrowAddress) fromId = 'escrow';
+          if (tx.to === escrowAddress) toId = 'escrow';
+
+          // Only create animation if both endpoints are known
+          if ((fromUser || fromId === 'admin' || fromId === 'escrow') && 
+              (toUser || toId === 'admin' || toId === 'escrow')) {
+            networkTx = {
+              id: tx.signature,
+              from: fromId,
+              to: toId,
+              amount,
+              timestamp: performance.now(),
+            };
+          }
+        }
+      }
+
+      // Add the network transaction if we created one
+      if (networkTx) {
+        addNetworkTransaction(networkTx);
+      }
+
+      // Update escrow balance if involved
+      if (isEscrowTransaction) {
+        fetchEscrowBalance();
+      }
     }
-  }, [users, refetchBalances]);
+  }, [users, refetchBalances, addNetworkTransaction, fetchEscrowBalance]);
 
   // Connect to WebSocket
   useContraWebSocket(handleWebSocketTransaction, liveTransactionsActive);
@@ -206,25 +305,25 @@ export function useUsers() {
   }, [users.length]); // Only depend on users.length, not the full users array
 
   /* ---- Fetch escrow balance ---- */
-  useEffect(() => {
-    async function fetchEscrowBalance() {
-      try {
-        const instanceAddr = address(import.meta.env.VITE_INSTANCE_ADDRESS as string);
-        const mintAddr = address(import.meta.env.VITE_MINT_ADDRESS as string);
+  const fetchEscrowBalance = useCallback(async () => {
+    try {
+      const instanceAddr = address(import.meta.env.VITE_INSTANCE_ADDRESS as string);
+      const mintAddr = address(import.meta.env.VITE_MINT_ADDRESS as string);
 
-        const balance = await getTokenBalance(instanceAddr, mintAddr, rpc);
-        setEscrowBalance(formatBalance(balance));
-      } catch (error) {
-        console.error('Failed to fetch escrow balance:', error);
-      }
+      const balance = await getTokenBalance(instanceAddr, mintAddr, rpc);
+      setEscrowBalance(formatBalance(balance));
+    } catch (error) {
+      console.error('Failed to fetch escrow balance:', error);
     }
+  }, [rpc]);
 
+  useEffect(() => {
     fetchEscrowBalance();
 
     // Poll every 10 seconds
     const interval = setInterval(fetchEscrowBalance, 10000);
     return () => clearInterval(interval);
-  }, [rpc]);
+  }, [fetchEscrowBalance]);
 
   /* ---- Fetch admin balance ---- */
   useEffect(() => {
