@@ -75,6 +75,7 @@ export default function App() {
             admin={adminState}
             transactions={networkTransactions}
             onSelectUser={setSelectedId}
+            liveTransactionsActive={liveTransactionsActive}
           />
         ) : isAdminView ? (
           <AdminDashboard
@@ -86,7 +87,7 @@ export default function App() {
             onPayOutAll={payOutAll}
           />
         ) : (
-          <div className="center-stage">
+          <div className="center-stage" key={selectedUser!.id}>
             <PhoneSimulator>
               <DashboardScreen
                 user={selectedUser!}

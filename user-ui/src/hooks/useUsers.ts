@@ -82,7 +82,10 @@ export function useUsers() {
   const [liveTransactionsActive, setLiveTransactionsActive] = useState(false);
   const [networkTransactions, setNetworkTransactions] = useState<NetworkTransaction[]>([]);
 
-  /* Keep a ref so the live generator always reads the latest mode */
+  /* ---- Refs for reading latest state without re-triggering effects ---- */
+  const usersRef = useRef(users);
+  usersRef.current = users;
+
   const payoutModeRef = useRef(payoutMode);
   useEffect(() => {
     payoutModeRef.current = payoutMode;
@@ -120,9 +123,7 @@ export function useUsers() {
   const setPayoutMode = useCallback((mode: PayoutMode) => {
     setPayoutModeState((prev) => {
       if (prev === mode) return prev;
-      // Flush all pending when switching manual -> auto
       if (prev === 'manual' && mode === 'auto') {
-        // Defer so state setter doesn't nest
         setTimeout(() => payOutAllRef.current(), 0);
       }
       return mode;
@@ -207,7 +208,6 @@ export function useUsers() {
     setTimeout(() => {
       if (payoutAmount <= 0) return;
 
-      // Animate the payout on the network view
       firePayoutAnimation(userId, payoutAmount);
 
       setUsers((prev) =>
@@ -246,7 +246,6 @@ export function useUsers() {
       if (totalPaid <= 0) return prev;
 
       setTimeout(() => {
-        // Animate each payout on the network view
         for (const [uid, amount] of Object.entries(payouts)) {
           firePayoutAnimation(uid, amount);
         }
@@ -294,58 +293,55 @@ export function useUsers() {
     let timeout: ReturnType<typeof setTimeout>;
 
     function tick() {
-      setUsers((currentUsers) => {
-        if (currentUsers.length === 0) return currentUsers;
-        const randomUser = currentUsers[Math.floor(Math.random() * currentUsers.length)];
-        const amount = Math.round((Math.random() * 40 + 5) * 100) / 100;
+      // Read current users from ref -- NO nesting state setters inside setUsers
+      const currentUsers = usersRef.current;
+      if (currentUsers.length === 0) {
+        timeout = setTimeout(tick, 1000);
+        return;
+      }
 
-        const isAuto = payoutModeRef.current === 'auto';
+      const randomUser = currentUsers[Math.floor(Math.random() * currentUsers.length)];
+      const amount = Math.round((Math.random() * 40 + 5) * 100) / 100;
+      const isAuto = payoutModeRef.current === 'auto';
 
-        if (isAuto) {
-          // Auto: debit treasury and credit user immediately
-          setAdminState((prev) => ({
-            ...prev,
-            balance: prev.balance - amount,
-          }));
+      // Fire network animation (always, regardless of mode)
+      firePayoutAnimation(randomUser.id, amount);
 
-          // Credit user balance + add activity entry (return mutated user)
-          const tx: Transaction = {
-            id: `auto-${Date.now()}-${Math.random()}`,
-            type: 'earning',
-            amount,
-            timestamp: Date.now(),
-            from: 'marketplace',
-          };
-          // We need to return updated users in auto mode
-          const updated = currentUsers.map((u) => {
+      if (isAuto) {
+        // Auto: debit treasury immediately
+        setAdminState((prev) => ({
+          ...prev,
+          balance: prev.balance - amount,
+        }));
+
+        // Credit user balance + add activity entry
+        setUsers((prev) =>
+          prev.map((u) => {
             if (u.id !== randomUser.id) return u;
+            const tx: Transaction = {
+              id: `auto-${Date.now()}-${Math.random()}`,
+              type: 'earning',
+              amount,
+              timestamp: Date.now(),
+              from: 'marketplace',
+            };
             return {
               ...u,
               balance: u.balance + amount,
               transactions: [tx, ...u.transactions].slice(0, 50),
             };
-          });
-
-          // Fire network animation
-          firePayoutAnimation(randomUser.id, amount);
-
-          return updated;
-        } else {
-          // Manual: accumulate pending
-          setAdminState((prev) => ({
-            ...prev,
-            pendingPayouts: {
-              ...prev.pendingPayouts,
-              [randomUser.id]: (prev.pendingPayouts[randomUser.id] ?? 0) + amount,
-            },
-          }));
-
-          // Fire network animation
-          firePayoutAnimation(randomUser.id, amount);
-
-          return currentUsers; // no mutation
-        }
-      });
+          }),
+        );
+      } else {
+        // Manual: accumulate pending
+        setAdminState((prev) => ({
+          ...prev,
+          pendingPayouts: {
+            ...prev.pendingPayouts,
+            [randomUser.id]: (prev.pendingPayouts[randomUser.id] ?? 0) + amount,
+          },
+        }));
+      }
 
       const nextDelay = 800 + Math.random() * 1200;
       timeout = setTimeout(tick, nextDelay);
@@ -355,7 +351,7 @@ export function useUsers() {
     timeout = setTimeout(tick, firstDelay);
 
     return () => clearTimeout(timeout);
-  }, [liveTransactionsActive]);
+  }, [liveTransactionsActive, firePayoutAnimation]);
 
   return {
     users,
