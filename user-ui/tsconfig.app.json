@@ -16,6 +16,14 @@
     "noEmit": true,
     "jsx": "react-jsx",
 
+    /* Path mappings */
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./src/*"],
+      "@contra-withdraw": ["../contra-withdraw-program/clients/typescript/src/generated"],
+      "@contra-escrow": ["../contra-escrow-program/clients/typescript/src/generated"]
+    },
+
     /* Linting */
     "strict": true,
     "noUnusedLocals": true,

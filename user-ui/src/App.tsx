@@ -7,6 +7,9 @@ import { DashboardScreen } from './components/DashboardScreen.tsx';
 import { NetworkView } from './components/NetworkView.tsx';
 import { AdminDashboard } from './components/AdminDashboard.tsx';
 import { SettingsDrawer } from './components/SettingsDrawer.tsx';
+import { LoadingOverlay } from './components/LoadingOverlay.tsx';
+import { ErrorBanner } from './components/ErrorBanner.tsx';
+import { ToastContainer } from './components/Toast.tsx';
 
 export default function App() {
   const {
@@ -26,6 +29,17 @@ export default function App() {
     networkTransactions,
     payOutUser,
     payOutAll,
+    withdrawUser,
+    withdrawAdmin,
+    escrowBalance,
+    isLoadingBalances,
+    balancesError,
+    refetchBalances,
+    payoutsInProgress,
+    payoutErrors,
+    toasts,
+    dismissToast,
+    recentAutoPayouts,
   } = useUsers();
 
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -70,22 +84,35 @@ export default function App() {
 
         {/* Center stage */}
         {isNetworkView ? (
-          <NetworkView
-            users={users}
-            admin={adminState}
-            transactions={networkTransactions}
-            onSelectUser={setSelectedId}
-            liveTransactionsActive={liveTransactionsActive}
-          />
+          <div className="network-view-container">
+            <NetworkView
+              users={users}
+              admin={adminState}
+              transactions={networkTransactions}
+              onSelectUser={setSelectedId}
+              liveTransactionsActive={liveTransactionsActive}
+              escrowBalance={escrowBalance}
+            />
+            <LoadingOverlay isLoading={isLoadingBalances} message="Loading balances..." />
+            <ErrorBanner error={balancesError} onRetry={refetchBalances} />
+          </div>
         ) : isAdminView ? (
-          <AdminDashboard
-            admin={adminState}
-            users={users}
-            payoutMode={payoutMode}
-            onSetPayoutMode={setPayoutMode}
-            onPayOutUser={payOutUser}
-            onPayOutAll={payOutAll}
-          />
+          <div className="admin-dashboard-container">
+            <AdminDashboard
+              admin={adminState}
+              users={users}
+              payoutMode={payoutMode}
+              onSetPayoutMode={setPayoutMode}
+              onPayOutUser={payOutUser}
+              onPayOutAll={payOutAll}
+              onWithdrawAdmin={withdrawAdmin}
+              payoutsInProgress={payoutsInProgress}
+              payoutErrors={payoutErrors}
+              recentAutoPayouts={recentAutoPayouts}
+            />
+            <LoadingOverlay isLoading={isLoadingBalances} message="Loading balances..." />
+            <ErrorBanner error={balancesError} onRetry={refetchBalances} />
+          </div>
         ) : (
           <div className="center-stage" key={selectedUser!.id}>
             <PhoneSimulator>
@@ -93,6 +120,7 @@ export default function App() {
                 user={selectedUser!}
                 pendingEarnings={adminState.pendingPayouts[selectedUser!.id] ?? 0}
                 onCollectEarnings={() => payOutUser(selectedUser!.id)}
+                onWithdraw={withdrawUser}
                 payoutMode={payoutMode}
               />
             </PhoneSimulator>
@@ -109,6 +137,9 @@ export default function App() {
         liveTransactionsActive={liveTransactionsActive}
         onToggleLiveTransactions={toggleLiveTransactions}
       />
+
+      {/* Toast notifications */}
+      <ToastContainer toasts={toasts} onDismiss={dismissToast} />
     </div>
   );
 }

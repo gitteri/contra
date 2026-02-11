@@ -10,6 +10,22 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@solana-program/system": "^0.11.0",
+    "@solana-program/token": "^0.10.0",
+    "@solana/addresses": "^2.0.3",
+    "@solana/codecs-strings": "^5.0.0",
+    "@solana/kit": "^3.0.3",
+    "@solana/react": "^6.0.1",
+    "@solana/rpc": "^2.0.3",
+    "@solana/rpc-subscriptions": "^2.0.3",
+    "@solana/signers": "^2.0.3",
+    "@solana/transaction-messages": "^2.0.3",
+    "@solana/transactions": "^2.0.3",
+    "@solana/wallet-adapter-base": "^0.9.27",
+    "@solana/wallet-adapter-react": "^0.15.39",
+    "@solana/wallet-adapter-wallets": "^0.19.37",
+    "@wallet-standard/react": "^1.0.1",
+    "lucide-react": "^0.263.1",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"
   },

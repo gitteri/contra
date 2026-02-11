@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { AlertTriangle } from 'lucide-react';
 
 interface SettingsDrawerProps {
   open: boolean;
@@ -58,6 +59,26 @@ export function SettingsDrawer({
           </button>
         </div>
         <div className="settings-body">
+          {/* Security Warning */}
+          <div style={{
+            marginBottom: '16px',
+            padding: '12px',
+            backgroundColor: '#fef3c7',
+            border: '1px solid #fbbf24',
+            borderRadius: '8px',
+          }}>
+            <div style={{ display: 'flex', alignItems: 'start', gap: '8px' }}>
+              <AlertTriangle style={{ width: '20px', height: '20px', color: '#d97706', flexShrink: 0, marginTop: '2px' }} />
+              <div style={{ fontSize: '14px', color: '#78350f' }}>
+                <p style={{ fontWeight: '500', marginBottom: '4px' }}>Demo Wallets - Not for Production</p>
+                <p style={{ fontSize: '12px', margin: 0 }}>
+                  Wallets are stored in browser session storage and will be cleared when you close this tab.
+                  Never use these wallets for real funds or on mainnet.
+                </p>
+              </div>
+            </div>
+          </div>
+
           <div className="settings-field">
             <label className="settings-label">
               Number of Users

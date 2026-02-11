@@ -1,18 +1,22 @@
+import { useState } from 'react';
 import type { User } from '../types/user.ts';
 import type { PayoutMode } from '../utils/persistence.ts';
 import { truncateAddress } from '../utils/formatters.ts';
 import { BalanceCard } from './BalanceCard.tsx';
 import { ActivityList } from './ActivityList.tsx';
 import { BottomNavBar } from './BottomNavBar.tsx';
+import { WithdrawalDrawer } from './WithdrawalDrawer.tsx';
 
 interface DashboardScreenProps {
   user: User;
   pendingEarnings: number;
   onCollectEarnings: () => void;
+  onWithdraw: (userId: string, amount: number, destination: string) => Promise<void>;
   payoutMode: PayoutMode;
 }
 
-export function DashboardScreen({ user, pendingEarnings, onCollectEarnings, payoutMode }: DashboardScreenProps) {
+export function DashboardScreen({ user, pendingEarnings, onCollectEarnings, onWithdraw, payoutMode }: DashboardScreenProps) {
+  const [withdrawalDrawerOpen, setWithdrawalDrawerOpen] = useState(false);
   const isManual = payoutMode === 'manual';
   const hasPending = isManual && pendingEarnings > 0;
 
@@ -38,6 +42,15 @@ export function DashboardScreen({ user, pendingEarnings, onCollectEarnings, payo
         </div>
 
         <BalanceCard balance={user.balance} />
+
+        <button
+          className="withdraw-button"
+          type="button"
+          disabled={user.balance <= 0}
+          onClick={() => setWithdrawalDrawerOpen(true)}
+        >
+          Withdraw to Mainnet
+        </button>
 
         {hasPending && (
           <div className="pending-card">
@@ -65,6 +78,14 @@ export function DashboardScreen({ user, pendingEarnings, onCollectEarnings, payo
         <ActivityList transactions={user.transactions} />
       </div>
       <BottomNavBar />
+
+      <WithdrawalDrawer
+        open={withdrawalDrawerOpen}
+        onClose={() => setWithdrawalDrawerOpen(false)}
+        userBalance={user.balance}
+        userWallet={user.wallet.publicKey}
+        onWithdraw={(amount, dest) => onWithdraw(user.id, amount, dest)}
+      />
     </>
   );
 }

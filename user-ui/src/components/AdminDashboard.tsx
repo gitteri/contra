@@ -1,8 +1,9 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import type { User, AdminState } from '../types/user.ts';
 import type { PayoutMode } from '../utils/persistence.ts';
 import { UserAvatar } from './UserAvatar.tsx';
 import { formatBalance, truncateAddress } from '../utils/formatters.ts';
+import { AdminWithdrawalDrawer } from './AdminWithdrawalDrawer.tsx';
 
 interface AdminDashboardProps {
   admin: AdminState;
@@ -11,6 +12,10 @@ interface AdminDashboardProps {
   onSetPayoutMode: (mode: PayoutMode) => void;
   onPayOutUser: (userId: string) => void;
   onPayOutAll: () => void;
+  onWithdrawAdmin: (amount: number, destination: string) => Promise<void>;
+  payoutsInProgress: Set<string>;
+  payoutErrors: Map<string, Error>;
+  recentAutoPayouts: Map<string, { amount: number; timestamp: number }>;
 }
 
 export function AdminDashboard({
@@ -20,7 +25,12 @@ export function AdminDashboard({
   onSetPayoutMode,
   onPayOutUser,
   onPayOutAll,
+  onWithdrawAdmin,
+  payoutsInProgress,
+  payoutErrors,
+  recentAutoPayouts,
 }: AdminDashboardProps) {
+  const [adminWithdrawalDrawerOpen, setAdminWithdrawalDrawerOpen] = useState(false);
   const isAuto = payoutMode === 'auto';
 
   const stats = useMemo(() => {
@@ -42,7 +52,8 @@ export function AdminDashboard({
   const hasPending = stats.totalPending > 0;
 
   return (
-    <div className="admin-dashboard">
+    <>
+      <div className="admin-dashboard">
       {/* Treasury Balance */}
       <section className="admin-treasury-card">
         <div className="admin-treasury-inner">
@@ -54,6 +65,15 @@ export function AdminDashboard({
           <div className="admin-treasury-wallet">
             {truncateAddress(admin.wallet.publicKey, 6)}
           </div>
+
+          <button
+            className="admin-treasury-withdraw-button"
+            type="button"
+            disabled={admin.balance <= 0}
+            onClick={() => setAdminWithdrawalDrawerOpen(true)}
+          >
+            Withdraw Treasury
+          </button>
         </div>
       </section>
 
@@ -65,7 +85,7 @@ export function AdminDashboard({
         </div>
         <div className="stat-card">
           <div className="stat-card-value">{formatBalance(stats.totalCirculation)}</div>
-          <div className="stat-card-label">USDA in Circulation</div>
+          <div className="stat-card-label">USDA Paid Out</div>
         </div>
         <div className="stat-card">
           <div className="stat-card-value">{formatBalance(stats.totalPending)}</div>
@@ -118,7 +138,7 @@ export function AdminDashboard({
           <div className={`payout-row payout-row--header${isAuto ? ' payout-row--auto' : ''}`}>
             <div className="payout-cell payout-cell--user">User</div>
             <div className="payout-cell payout-cell--wallet">Wallet</div>
-            <div className="payout-cell payout-cell--pending">{isAuto ? 'Last Paid' : 'Pending'}</div>
+            <div className="payout-cell payout-cell--pending">{isAuto ? 'Balance' : 'Pending'}</div>
             <div className="payout-cell payout-cell--status">Status</div>
             {!isAuto && <div className="payout-cell payout-cell--action">Action</div>}
           </div>
@@ -127,54 +147,75 @@ export function AdminDashboard({
           {users.map((user) => {
             const pending = admin.pendingPayouts[user.id] ?? 0;
             const isPending = pending > 0;
+            const isProcessing = payoutsInProgress.has(user.id);
+            const error = payoutErrors.get(user.id);
+            const recentPayout = recentAutoPayouts.get(user.id);
 
             return (
-              <div key={user.id} className={`payout-row${isAuto ? ' payout-row--auto' : ''}`}>
-                <div className="payout-cell payout-cell--user">
-                  <UserAvatar
-                    firstName={user.firstName}
-                    lastName={user.lastName}
-                    color={user.avatarColor}
-                  />
-                  <span className="payout-user-name">
-                    {user.firstName} {user.lastName}
-                  </span>
-                </div>
-                <div className="payout-cell payout-cell--wallet">
-                  <span className="payout-wallet-address">
-                    {truncateAddress(user.wallet.publicKey, 4)}
-                  </span>
-                </div>
-                <div className="payout-cell payout-cell--pending">
-                  {isAuto ? (
-                    <span className="payout-amount">
-                      {formatBalance(user.balance)} USDA
+              <div key={user.id}>
+                <div className={`payout-row${isAuto ? ' payout-row--auto' : ''}`}>
+                  <div className="payout-cell payout-cell--user">
+                    <UserAvatar
+                      firstName={user.firstName}
+                      lastName={user.lastName}
+                      color={user.avatarColor}
+                    />
+                    <span className="payout-user-name">
+                      {user.firstName} {user.lastName}
                     </span>
-                  ) : (
-                    <span className={`payout-amount${isPending ? ' payout-amount--active' : ''}`}>
-                      {formatBalance(pending)} USDA
+                  </div>
+                  <div className="payout-cell payout-cell--wallet">
+                    <span className="payout-wallet-address">
+                      {truncateAddress(user.wallet.publicKey, 4)}
                     </span>
+                  </div>
+                  <div className="payout-cell payout-cell--pending">
+                    {isAuto ? (
+                      recentPayout ? (
+                        <span className="payout-amount payout-amount--auto-success">
+                          +{formatBalance(recentPayout.amount)} USDA
+                        </span>
+                      ) : (
+                        <span className="payout-amount">
+                          {formatBalance(user.balance)} USDA
+                        </span>
+                      )
+                    ) : (
+                      <span className={`payout-amount${isPending ? ' payout-amount--active' : ''}`}>
+                        {formatBalance(pending)} USDA
+                      </span>
+                    )}
+                  </div>
+                  <div className="payout-cell payout-cell--status">
+                    {isAuto ? (
+                      <span className="payout-status payout-status--auto">Auto</span>
+                    ) : isProcessing ? (
+                      <span className="payout-status payout-status--processing">Processing...</span>
+                    ) : (
+                      <span className={`payout-status ${isPending ? 'payout-status--pending' : 'payout-status--paid'}`}>
+                        {isPending ? 'Pending' : 'Paid'}
+                      </span>
+                    )}
+                  </div>
+                  {!isAuto && (
+                    <div className="payout-cell payout-cell--action">
+                      <button
+                        className={`pay-button${!isPending || isProcessing ? ' pay-button--disabled' : ''}`}
+                        onClick={() => onPayOutUser(user.id)}
+                        disabled={!isPending || isProcessing}
+                        type="button"
+                      >
+                        {isProcessing ? 'Processing...' : 'Pay'}
+                      </button>
+                    </div>
                   )}
                 </div>
-                <div className="payout-cell payout-cell--status">
-                  {isAuto ? (
-                    <span className="payout-status payout-status--auto">Auto</span>
-                  ) : (
-                    <span className={`payout-status ${isPending ? 'payout-status--pending' : 'payout-status--paid'}`}>
-                      {isPending ? 'Pending' : 'Paid'}
+                {error && !isAuto && (
+                  <div className="payout-error">
+                    <span className="payout-error-icon">⚠️</span>
+                    <span className="payout-error-message">
+                      Payout failed: {error.message}
                     </span>
-                  )}
-                </div>
-                {!isAuto && (
-                  <div className="payout-cell payout-cell--action">
-                    <button
-                      className={`pay-button${!isPending ? ' pay-button--disabled' : ''}`}
-                      onClick={() => onPayOutUser(user.id)}
-                      disabled={!isPending}
-                      type="button"
-                    >
-                      Pay
-                    </button>
                   </div>
                 )}
               </div>
@@ -182,6 +223,14 @@ export function AdminDashboard({
           })}
         </div>
       </section>
-    </div>
+      </div>
+
+      <AdminWithdrawalDrawer
+        open={adminWithdrawalDrawerOpen}
+        onClose={() => setAdminWithdrawalDrawerOpen(false)}
+        treasuryBalance={admin.balance}
+        onWithdraw={onWithdrawAdmin}
+      />
+    </>
   );
 }

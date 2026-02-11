@@ -19,6 +19,7 @@ interface NetworkViewProps {
   transactions: NetworkTransaction[];
   onSelectUser: (id: string) => void;
   liveTransactionsActive?: boolean;
+  escrowBalance: number;
 }
 
 /* ------------------------------------------------------------------ */
@@ -34,7 +35,6 @@ const ADMIN_COLOR = '#9945ff';
 const ESCROW_COLOR = '#14b8a6';
 const ESCROW_RECT_W = 52;
 const ESCROW_RECT_H = 44;
-const ESCROW_BALANCE = 50_000;
 
 /* ------------------------------------------------------------------ */
 /*  Helpers                                                            */
@@ -76,6 +76,7 @@ export function NetworkView({
   transactions,
   onSelectUser,
   liveTransactionsActive = false,
+  escrowBalance,
 }: NetworkViewProps) {
   const [viewMode, setViewMode] = useState<ViewMode>('network');
   const [hoveredId, setHoveredId] = useState<string | null>(null);
@@ -741,7 +742,7 @@ export function NetworkView({
                 {isAdmin ? 'Contra Admin' : isEscrow ? 'Escrow Contract' : `${user!.firstName} ${user!.lastName}`}
               </div>
               <div className="network-tooltip-balance">
-                {formatBalance(isAdmin ? admin.balance : isEscrow ? ESCROW_BALANCE : user!.balance)} USDA
+                {formatBalance(isAdmin ? admin.balance : isEscrow ? escrowBalance : user!.balance)} USDA
               </div>
             </div>
           );

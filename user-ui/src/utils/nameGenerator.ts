@@ -38,17 +38,8 @@ function simpleHash(str: string): number {
   return Math.abs(hash);
 }
 
-/** Generate a fake base58-like public key string. */
-export function fakePublicKey(seed: number): string {
-  const chars = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
-  let key = '';
-  let s = seed;
-  for (let i = 0; i < 44; i++) {
-    s = ((s * 1103515245 + 12345) >>> 0) & 0x7fffffff;
-    key += chars[s % chars.length];
-  }
-  return key;
-}
+import { generateUserWallet, loadUserWallet } from './walletStorage';
+import type { KeyPairSigner } from '@solana/signers';
 
 export interface GeneratedUser {
   id: string;
@@ -56,10 +47,11 @@ export interface GeneratedUser {
   lastName: string;
   avatarColor: string;
   publicKey: string;
+  signer?: KeyPairSigner; // Optional - only available when generated
 }
 
-/** Generate a deterministic list of N unique users. */
-export function generateUsers(count: number): GeneratedUser[] {
+/** Generate a deterministic list of N unique users with real Solana wallets. */
+export async function generateUsers(count: number): Promise<GeneratedUser[]> {
   const users: GeneratedUser[] = [];
   const usedNames = new Set<string>();
 
@@ -83,13 +75,22 @@ export function generateUsers(count: number): GeneratedUser[] {
 
     const fullName = `${firstName}${lastName}`;
     const hash = simpleHash(fullName);
+    const userId = `user-${i}`;
+
+    // Try to load existing wallet first, generate new one if not found
+    let signer = await loadUserWallet(userId);
+    if (!signer) {
+      const wallet = await generateUserWallet(userId);
+      signer = wallet.signer;
+    }
 
     users.push({
-      id: `user-${i}`,
+      id: userId,
       firstName,
       lastName,
       avatarColor: AVATAR_COLORS[hash % AVATAR_COLORS.length],
-      publicKey: fakePublicKey(hash),
+      publicKey: signer.address,
+      signer,
     });
   }
 
