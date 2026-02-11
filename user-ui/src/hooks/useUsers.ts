@@ -84,7 +84,7 @@ export function useUsers() {
   const [adminState, setAdminState] = useState<AdminState>(initial.adminState);
   const [selectedId, setSelectedId] = useState<string>(initial.selectedId);
   const [payoutMode, setPayoutModeState] = useState<PayoutMode>(initial.payoutMode);
-  const [liveTransactionsActive, setLiveTransactionsActive] = useState(false);
+  const [liveTransactionsActive, setLiveTransactionsActive] = useState(false); // For simulated transactions only
   const [networkTransactions, setNetworkTransactions] = useState<NetworkTransaction[]>([]);
   const [pendingPayouts, setPendingPayouts] = useState<Map<string, number>>(new Map());
   const [escrowBalance, setEscrowBalance] = useState<number>(0);
@@ -233,8 +233,8 @@ export function useUsers() {
     }
   }, [users, refetchBalances, addNetworkTransaction, fetchEscrowBalance]);
 
-  // Connect to WebSocket
-  useContraWebSocket(handleWebSocketTransaction, liveTransactionsActive);
+  // Connect to WebSocket (always active for real data)
+  useContraWebSocket(handleWebSocketTransaction, true);
 
   /* ---- Initialize users and admin wallet on mount ---- */
   useEffect(() => {
@@ -940,14 +940,14 @@ export function useUsers() {
     }
   }, [adminBalance, adminSigner, rpc, rpcWrite, refetchBalances, showSuccess, showError]);
 
-  /* ---- Live transactions generator ---- */
+  /* ---- Simulated transactions generator ---- */
   useEffect(() => {
     if (!liveTransactionsActive) {
-      console.log('[Live Transactions] Not active');
+      console.log('[Simulated Transactions] Not active');
       return;
     }
 
-    console.log('[Live Transactions] Starting...');
+    console.log('[Simulated Transactions] Starting...');
     let timeout: ReturnType<typeof setTimeout>;
 
     async function tick() {
@@ -962,7 +962,7 @@ export function useUsers() {
       const amount = Math.round((Math.random() * 40 + 5) * 100) / 100;
       const isAuto = payoutModeRef.current === 'auto';
 
-      console.log(`[Live Transactions] Generated transaction: ${amount} USDA to ${randomUser.firstName} (mode: ${isAuto ? 'auto' : 'manual'})`);
+      console.log(`[Simulated Transactions] Generated transaction: ${amount} USDA to ${randomUser.firstName} (mode: ${isAuto ? 'auto' : 'manual'})`);
 
       // Fire network animation (always, regardless of mode)
       firePayoutAnimation(randomUser.id, amount);
