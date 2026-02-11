@@ -321,7 +321,6 @@ export function NetworkView({
         viewBox={`0 0 ${containerSize.width} ${containerSize.height}`}
       >
         <defs>
-          {/* --- Filters --- */}
           <filter id="node-glow" x="-50%" y="-50%" width="200%" height="200%">
             <feGaussianBlur stdDeviation="4" result="blur" />
             <feMerge>
@@ -350,68 +349,10 @@ export function NetworkView({
               <feMergeNode in="SourceGraphic" />
             </feMerge>
           </filter>
-
-          {/* Drop shadow: top-down light, shadow falls below */}
-          <filter id="drop-shadow" x="-30%" y="-20%" width="160%" height="180%">
-            <feDropShadow dx={0} dy={3} stdDeviation={4} floodColor="#000" floodOpacity={0.5} />
+          {/* Soft drop shadow for elevated nodes */}
+          <filter id="drop-shadow" x="-30%" y="-20%" width="160%" height="170%">
+            <feDropShadow dx={0} dy={2} stdDeviation={3} floodColor="#000" floodOpacity={0.35} />
           </filter>
-
-          {/* Soft ambient glow behind the bubble */}
-          <filter id="bubble-ambient" x="-20%" y="-20%" width="140%" height="140%">
-            <feGaussianBlur stdDeviation="30" />
-          </filter>
-
-          {/* --- Gradients for 3D node shading --- */}
-          {/* Top-lit sphere: white highlight top, dark shadow bottom */}
-          <linearGradient id="node-3d" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor="white" stopOpacity={0.22} />
-            <stop offset="40%" stopColor="white" stopOpacity={0.04} />
-            <stop offset="70%" stopColor="black" stopOpacity={0.05} />
-            <stop offset="100%" stopColor="black" stopOpacity={0.2} />
-          </linearGradient>
-
-          {/* Specular highlight dot (top-left) */}
-          <radialGradient id="specular" cx="35%" cy="30%" r="35%">
-            <stop offset="0%" stopColor="white" stopOpacity={0.35} />
-            <stop offset="100%" stopColor="white" stopOpacity={0} />
-          </radialGradient>
-
-          {/* Escrow rect 3D overlay */}
-          <linearGradient id="rect-3d" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor="white" stopOpacity={0.18} />
-            <stop offset="35%" stopColor="white" stopOpacity={0.02} />
-            <stop offset="100%" stopColor="black" stopOpacity={0.2} />
-          </linearGradient>
-
-          {/* --- Bubble gradients --- */}
-          {/* Main fill: lit from above, dark edges like a sphere */}
-          <radialGradient id="bubble-fill" cx="50%" cy="35%" r="65%">
-            <stop offset="0%" stopColor="#2d2d38" />
-            <stop offset="35%" stopColor="#242430" />
-            <stop offset="70%" stopColor="#1a1a24" />
-            <stop offset="100%" stopColor="#111118" />
-          </radialGradient>
-
-          {/* Specular crescent on the bubble top */}
-          <radialGradient id="bubble-spec" cx="50%" cy="0%" r="70%">
-            <stop offset="0%" stopColor="white" stopOpacity={0.07} />
-            <stop offset="60%" stopColor="white" stopOpacity={0.01} />
-            <stop offset="100%" stopColor="white" stopOpacity={0} />
-          </radialGradient>
-
-          {/* Rim light gradient for bubble stroke */}
-          <linearGradient id="bubble-rim" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor="#9945ff" stopOpacity={0.6} />
-            <stop offset="50%" stopColor="#9945ff" stopOpacity={0.15} />
-            <stop offset="100%" stopColor="#9945ff" stopOpacity={0.05} />
-          </linearGradient>
-
-          {/* Network boundary soft glow ring */}
-          <radialGradient id="ring-fade" cx="50%" cy="50%" r="50%">
-            <stop offset="85%" stopColor={ADMIN_COLOR} stopOpacity={0} />
-            <stop offset="95%" stopColor={ADMIN_COLOR} stopOpacity={0.06} />
-            <stop offset="100%" stopColor={ADMIN_COLOR} stopOpacity={0} />
-          </radialGradient>
         </defs>
 
         {/* ============================================================ */}
@@ -419,15 +360,7 @@ export function NetworkView({
         {/* ============================================================ */}
         {!isMainnet && (
           <>
-            {/* Soft glow ring around Contra boundary */}
-            <ellipse
-              cx={cx}
-              cy={cy}
-              rx={bubbleRx}
-              ry={bubbleRy}
-              fill="url(#ring-fade)"
-            />
-            {/* Crisp dashed boundary */}
+            {/* Contra boundary ring -- thin solid stroke */}
             <ellipse
               cx={cx}
               cy={cy}
@@ -436,8 +369,7 @@ export function NetworkView({
               fill="none"
               stroke={ADMIN_COLOR}
               strokeWidth={1}
-              strokeDasharray="6 5"
-              strokeOpacity={0.18}
+              strokeOpacity={0.12}
             />
 
             {/* Hub-and-spoke lines */}
@@ -492,10 +424,7 @@ export function NetworkView({
                 filter="url(#admin-glow)"
               />
               <circle cx={cx} cy={cy} r={adminR} fill={ADMIN_COLOR} className="network-node-circle" />
-              {/* 3D depth: lit top, shadowed bottom */}
-              <circle cx={cx} cy={cy} r={adminR} fill="url(#node-3d)" pointerEvents="none" />
-              {/* Specular highlight */}
-              <circle cx={cx} cy={cy} r={adminR} fill="url(#specular)" pointerEvents="none" />
+              <circle cx={cx} cy={cy} r={adminR - 1} fill="none" stroke="rgba(255,255,255,0.08)" strokeWidth={1} />
               <text
                 x={cx}
                 y={cy}
@@ -538,10 +467,7 @@ export function NetworkView({
                     fill={node.user.avatarColor}
                     className="network-node-circle"
                   />
-                  {/* 3D depth overlay */}
-                  <circle cx={node.x} cy={node.y} r={r} fill="url(#node-3d)" pointerEvents="none" />
-                  {/* Specular highlight */}
-                  <circle cx={node.x} cy={node.y} r={r} fill="url(#specular)" pointerEvents="none" />
+                  <circle cx={node.x} cy={node.y} r={r - 1} fill="none" stroke="rgba(255,255,255,0.06)" strokeWidth={1} />
                   <text
                     x={node.x}
                     y={node.y}
@@ -563,67 +489,16 @@ export function NetworkView({
         {/* ============================================================ */}
         {isMainnet && (
           <g>
-            {/* Ambient glow behind the bubble */}
-            <ellipse
-              cx={cx}
-              cy={cy + 10}
-              rx={bubbleRx * 0.7}
-              ry={bubbleRy * 0.5}
-              fill={ADMIN_COLOR}
-              opacity={0.04}
-              filter="url(#bubble-ambient)"
-            />
-
-            {/* Main bubble body with sphere-like radial gradient */}
+            {/* Main bubble -- slightly elevated from bg, solid fill, clean border */}
             <ellipse
               cx={cx}
               cy={cy}
               rx={bubbleRx}
               ry={bubbleRy}
-              fill="url(#bubble-fill)"
-            />
-
-            {/* Rim light stroke: bright top, fades at bottom */}
-            <ellipse
-              cx={cx}
-              cy={cy}
-              rx={bubbleRx}
-              ry={bubbleRy}
-              fill="none"
-              stroke="url(#bubble-rim)"
-              strokeWidth={1.5}
-            />
-
-            {/* Dashed outer ring for texture */}
-            <ellipse
-              cx={cx}
-              cy={cy}
-              rx={bubbleRx + 4}
-              ry={bubbleRy + 4}
-              fill="none"
+              fill="#18181f"
               stroke={ADMIN_COLOR}
-              strokeWidth={0.5}
-              strokeDasharray="4 6"
-              strokeOpacity={0.15}
-            />
-
-            {/* Specular crescent at top */}
-            <ellipse
-              cx={cx}
-              cy={cy - bubbleRy * 0.35}
-              rx={bubbleRx * 0.55}
-              ry={bubbleRy * 0.3}
-              fill="url(#bubble-spec)"
-            />
-
-            {/* Inner bottom shadow for depth */}
-            <ellipse
-              cx={cx}
-              cy={cy + bubbleRy * 0.3}
-              rx={bubbleRx * 0.8}
-              ry={bubbleRy * 0.35}
-              fill="black"
-              opacity={0.12}
+              strokeWidth={1}
+              strokeOpacity={0.25}
             />
 
             <text
@@ -633,7 +508,7 @@ export function NetworkView({
               dominantBaseline="central"
               className="network-bubble-title"
             >
-              Contra Network
+              Contra (Private)
             </text>
             <text
               x={cx}
@@ -719,17 +594,6 @@ export function NetworkView({
             fill={ESCROW_COLOR}
             stroke="rgba(255,255,255,0.08)"
             strokeWidth={1}
-          />
-          {/* 3D depth overlay */}
-          <rect
-            x={escrowX - ESCROW_RECT_W / 2}
-            y={escrowY - ESCROW_RECT_H / 2}
-            width={ESCROW_RECT_W}
-            height={ESCROW_RECT_H}
-            rx={10}
-            ry={10}
-            fill="url(#rect-3d)"
-            pointerEvents="none"
           />
           <text
             x={escrowX}
