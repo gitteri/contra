@@ -20,6 +20,7 @@ interface NetworkViewProps {
   onSelectUser: (id: string) => void;
   liveTransactionsActive?: boolean;
   escrowBalance: number;
+  wsConnected?: boolean;
 }
 
 /* ------------------------------------------------------------------ */
@@ -77,6 +78,7 @@ export function NetworkView({
   onSelectUser,
   liveTransactionsActive = false,
   escrowBalance,
+  wsConnected = false,
 }: NetworkViewProps) {
   const [viewMode, setViewMode] = useState<ViewMode>('network');
   const [hoveredId, setHoveredId] = useState<string | null>(null);
@@ -311,7 +313,32 @@ export function NetworkView({
           <option value="network">Network View</option>
           <option value="mainnet">Mainnet View</option>
         </select>
-        <span className="network-title-count">{users.length} users</span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+          <span className="network-title-count">{users.length} users</span>
+          <div 
+            style={{ 
+              display: 'flex', 
+              alignItems: 'center', 
+              gap: '6px',
+              padding: '4px 10px',
+              backgroundColor: wsConnected ? 'rgba(34, 197, 94, 0.1)' : 'rgba(239, 68, 68, 0.1)',
+              borderRadius: '12px',
+              fontSize: '12px',
+              color: wsConnected ? '#22c55e' : '#ef4444'
+            }}
+          >
+            <span 
+              style={{ 
+                width: '6px', 
+                height: '6px', 
+                borderRadius: '50%', 
+                backgroundColor: wsConnected ? '#22c55e' : '#ef4444',
+                animation: wsConnected ? 'pulse 2s ease-in-out infinite' : 'none'
+              }} 
+            />
+            {wsConnected ? 'Live' : 'Offline'}
+          </div>
+        </div>
       </div>
 
       <svg

@@ -234,7 +234,7 @@ export function useUsers() {
   }, [users, refetchBalances, addNetworkTransaction, fetchEscrowBalance]);
 
   // Connect to WebSocket (always active for real data)
-  useContraWebSocket(handleWebSocketTransaction, true);
+  const { isConnected: wsConnected } = useContraWebSocket(handleWebSocketTransaction, true);
 
   /* ---- Initialize users and admin wallet on mount ---- */
   useEffect(() => {
@@ -1062,5 +1062,6 @@ export function useUsers() {
     withdrawAdmin,
     withdrawalsInProgress,
     withdrawalErrors,
+    wsConnected,
   };
 }
