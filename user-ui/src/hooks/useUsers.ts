@@ -121,6 +121,28 @@ export function useUsers() {
   // Fetch real balances from blockchain
   const { balances, isLoading: isLoadingBalances, error: balancesError, refetch: refetchBalances } = useBalances(walletAddresses);
 
+  /* ---- Network transactions ---- */
+  const addNetworkTransaction = useCallback((tx: NetworkTransaction) => {
+    setNetworkTransactions((prev) => [...prev, tx]);
+    setTimeout(() => {
+      setNetworkTransactions((prev) => prev.filter((t) => t.id !== tx.id));
+    }, 1500);
+  }, []);
+
+  /* ---- Fetch escrow balance ---- */
+  const fetchEscrowBalance = useCallback(async () => {
+    try {
+      const instanceAddr = address(import.meta.env.VITE_INSTANCE_ADDRESS as string);
+      const mintAddr = address(import.meta.env.VITE_MINT_ADDRESS as string);
+
+      const balance = await getTokenBalance(instanceAddr, mintAddr, rpc);
+      const decimals = await getMintDec();
+      setEscrowBalance(formatBalance(balance, decimals));
+    } catch (error) {
+      console.error('Failed to fetch escrow balance:', error);
+    }
+  }, [rpc, getMintDec]);
+
   // Handle incoming transactions from WebSocket
   const handleWebSocketTransaction = useCallback((tx: ContraTransaction) => {
     console.log('[useUsers] Received transaction:', tx);
@@ -315,20 +337,7 @@ export function useUsers() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [users.length]); // Only depend on users.length, not the full users array
 
-  /* ---- Fetch escrow balance ---- */
-  const fetchEscrowBalance = useCallback(async () => {
-    try {
-      const instanceAddr = address(import.meta.env.VITE_INSTANCE_ADDRESS as string);
-      const mintAddr = address(import.meta.env.VITE_MINT_ADDRESS as string);
-
-      const balance = await getTokenBalance(instanceAddr, mintAddr, rpc);
-      const decimals = await getMintDec();
-      setEscrowBalance(formatBalance(balance, decimals));
-    } catch (error) {
-      console.error('Failed to fetch escrow balance:', error);
-    }
-  }, [rpc]);
-
+  /* ---- Poll escrow balance ---- */
   useEffect(() => {
     fetchEscrowBalance();
 
@@ -517,13 +526,6 @@ export function useUsers() {
         };
       }),
     );
-  }, []);
-
-  const addNetworkTransaction = useCallback((tx: NetworkTransaction) => {
-    setNetworkTransactions((prev) => [...prev, tx]);
-    setTimeout(() => {
-      setNetworkTransactions((prev) => prev.filter((t) => t.id !== tx.id));
-    }, 1500);
   }, []);
 
   const toggleLiveTransactions = useCallback(() => {
