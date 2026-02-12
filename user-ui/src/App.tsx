@@ -40,6 +40,7 @@ export default function App() {
     toasts,
     dismissToast,
     recentAutoPayouts,
+    wsConnected,
   } = useUsers();
 
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -92,6 +93,7 @@ export default function App() {
               onSelectUser={setSelectedId}
               liveTransactionsActive={liveTransactionsActive}
               escrowBalance={escrowBalance}
+              wsConnected={wsConnected}
             />
             <LoadingOverlay isLoading={isLoadingBalances} message="Loading balances..." />
             <ErrorBanner error={balancesError} onRetry={refetchBalances} />

@@ -100,9 +100,9 @@ export function SettingsDrawer({
 
           <div className="settings-field">
             <label className="settings-label">
-              Live Transactions
+              Simulated Transactions
               <div className="settings-label-hint">
-                Simulate random USDA transfers between users
+                Generate random test transactions (real blockchain data always streams)
               </div>
             </label>
             <button
@@ -115,7 +115,7 @@ export function SettingsDrawer({
                   liveTransactionsActive ? 'live-tx-indicator--active' : ''
                 }`}
               />
-              {liveTransactionsActive ? 'Stop Live Transactions' : 'Start Live Transactions'}
+              {liveTransactionsActive ? 'Stop Simulations' : 'Start Simulations'}
             </button>
           </div>
         </div>
