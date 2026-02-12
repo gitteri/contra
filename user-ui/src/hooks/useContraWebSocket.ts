@@ -77,6 +77,7 @@ export function useContraWebSocket(
 
     ws.onerror = (err) => {
       console.error('[ContraWS] Error:', err);
+      console.warn('[ContraWS] WebSocket connection failed - Railway edge proxy may not be configured for WebSockets');
       // onclose will handle reconnection
     };
   }, []);
