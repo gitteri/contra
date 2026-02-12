@@ -9,7 +9,7 @@ import { loadUserWallet } from '../utils/walletStorage';
 import { useBalances } from './useBalances';
 import { useContraWebSocket, type ContraTransaction } from './useContraWebSocket';
 import { getPendingPayouts } from '../utils/contractState';
-import { formatBalance, getTokenBalance, toLamports } from '../utils/queries';
+import { formatBalance, getTokenBalance, toLamports, getMintDecimals } from '../utils/queries';
 import { useSolana } from '../context/SolanaContext';
 import { address } from '@solana/addresses';
 import { useAdminSigner } from './useAdminSigner';
@@ -99,6 +99,16 @@ export function useUsers() {
   const adminSigner = useAdminSigner();
   const { toasts, dismissToast, showSuccess, showError } = useToasts();
 
+  // Cache mint decimals — fetched once, used everywhere
+  const mintDecimalsRef = useRef<number | null>(null);
+  const getMintDec = useCallback(async (): Promise<number> => {
+    if (mintDecimalsRef.current !== null) return mintDecimalsRef.current;
+    const mintAddr = address(import.meta.env.VITE_MINT_ADDRESS as string);
+    const dec = await getMintDecimals(mintAddr, rpc);
+    mintDecimalsRef.current = dec;
+    return dec;
+  }, [rpc]);
+
   // Track previous balances to detect increases
   const previousBalancesRef = useRef<Map<string, number>>(new Map());
 
@@ -182,13 +192,14 @@ export function useUsers() {
         const addresses = users.map(u => address(u.wallet.publicKey));
 
         const payouts = await getPendingPayouts(addresses, instanceAddr, rpc);
+        const decimals = await getMintDec();
 
         // Convert to display format with userId keys
         const displayPayouts = new Map<string, number>();
         users.forEach(u => {
           const addr = address(u.wallet.publicKey);
           const amount = payouts.get(addr) || 0n;
-          displayPayouts.set(u.id, formatBalance(amount));
+          displayPayouts.set(u.id, formatBalance(amount, decimals));
         });
 
         setPendingPayouts(displayPayouts);
@@ -213,7 +224,8 @@ export function useUsers() {
         const mintAddr = address(import.meta.env.VITE_MINT_ADDRESS as string);
 
         const balance = await getTokenBalance(instanceAddr, mintAddr, rpc);
-        setEscrowBalance(formatBalance(balance));
+        const decimals = await getMintDec();
+        setEscrowBalance(formatBalance(balance, decimals));
       } catch (error) {
         console.error('Failed to fetch escrow balance:', error);
       }
@@ -237,7 +249,8 @@ export function useUsers() {
         const mintAddr = address(import.meta.env.VITE_MINT_ADDRESS as string);
 
         const balance = await getTokenBalance(adminAddr, mintAddr, rpc);
-        setAdminBalance(formatBalance(balance));
+        const decimals = await getMintDec();
+        setAdminBalance(formatBalance(balance, decimals));
       } catch (error) {
         console.error('Failed to fetch admin balance:', error);
       }
@@ -482,8 +495,9 @@ export function useUsers() {
         return next;
       });
 
-      // Convert to lamports
-      const amountLamports = toLamports(pendingAmount);
+      // Convert to lamports using real decimals
+      const decimals = await getMintDec();
+      const amountLamports = toLamports(pendingAmount, decimals);
 
       // Build and send transaction with retry logic
       const mintAddr = address(import.meta.env.VITE_MINT_ADDRESS as string);
@@ -567,7 +581,7 @@ export function useUsers() {
         return next;
       });
     }
-  }, [users, pendingPayouts, adminSigner, rpc, rpcWrite, refetchBalances, firePayoutAnimation, showSuccess, showError]);
+  }, [users, pendingPayouts, adminSigner, rpc, rpcWrite, refetchBalances, firePayoutAnimation, getMintDec, showSuccess, showError]);
 
   /* ---- Pay out all ---- */
   const payOutAll = useCallback(async () => {
@@ -684,8 +698,9 @@ export function useUsers() {
       }
       const destination = address(destinationAddress);
 
-      // Convert to lamports
-      const amountLamports = toLamports(amount);
+      // Convert to lamports using real decimals
+      const decimals = await getMintDec();
+      const amountLamports = toLamports(amount, decimals);
       const mintAddr = address(import.meta.env.VITE_MINT_ADDRESS as string);
 
       // Build and send transaction with retry logic
@@ -750,7 +765,7 @@ export function useUsers() {
         return next;
       });
     }
-  }, [users, balances, rpc, rpcWrite, refetchBalances, showSuccess, showError]);
+  }, [users, balances, rpc, rpcWrite, refetchBalances, getMintDec, showSuccess, showError]);
 
   /* ---- Withdraw admin funds (Contra → Mainnet Solana) ---- */
   const withdrawAdmin = useCallback(async (
@@ -792,8 +807,9 @@ export function useUsers() {
       }
       const destination = address(destinationAddress);
 
-      // Convert to lamports
-      const amountLamports = toLamports(amount);
+      // Convert to lamports using real decimals
+      const decimals = await getMintDec();
+      const amountLamports = toLamports(amount, decimals);
       const mintAddr = address(import.meta.env.VITE_MINT_ADDRESS as string);
 
       // Build and send transaction with retry logic
@@ -839,7 +855,7 @@ export function useUsers() {
         return next;
       });
     }
-  }, [adminBalance, adminSigner, rpc, rpcWrite, refetchBalances, showSuccess, showError]);
+  }, [adminBalance, adminSigner, rpc, rpcWrite, refetchBalances, getMintDec, showSuccess, showError]);
 
   /* ---- Live transactions generator ---- */
   useEffect(() => {
@@ -871,7 +887,8 @@ export function useUsers() {
       if (isAuto && adminSigner) {
         // Auto mode: Execute REAL transaction
         try {
-          const amountLamports = toLamports(amount);
+          const decimals = await getMintDec();
+          const amountLamports = toLamports(amount, decimals);
           const mintAddr = address(import.meta.env.VITE_MINT_ADDRESS as string);
           const userAddr = address(randomUser.wallet.publicKey);
 
@@ -928,7 +945,7 @@ export function useUsers() {
     timeout = setTimeout(tick, firstDelay);
 
     return () => clearTimeout(timeout);
-  }, [liveTransactionsActive, firePayoutAnimation, adminSigner, rpc, rpcWrite, refetchBalances]);
+  }, [liveTransactionsActive, firePayoutAnimation, adminSigner, rpc, rpcWrite, refetchBalances, getMintDec]);
 
   return {
     users: usersWithRealData,

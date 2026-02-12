@@ -5,6 +5,43 @@ import { findAssociatedTokenPda } from '@solana-program/token';
 
 const TOKEN_PROGRAM_ADDRESS = 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA' as const;
 
+/** Module-level cache: mint address → decimals */
+const mintDecimalsCache = new Map<string, number>();
+
+/**
+ * Get the decimals for a mint. Fetches from the RPC once and caches.
+ * Falls back to reading the mint account directly at byte offset 44.
+ */
+export async function getMintDecimals(
+  mintAddress: Address,
+  rpc: Rpc<any>
+): Promise<number> {
+  const key = mintAddress.toString();
+  const cached = mintDecimalsCache.get(key);
+  if (cached !== undefined) return cached;
+
+  try {
+    const response = await (rpc as any).getAccountInfo(mintAddress, {
+      encoding: 'base64',
+    }).send();
+
+    if (response.value?.data?.[0]) {
+      const data = Buffer.from(response.value.data[0], 'base64');
+      if (data.length >= 45) {
+        const decimals = data[44];
+        mintDecimalsCache.set(key, decimals);
+        return decimals;
+      }
+    }
+  } catch (error) {
+    console.error('Failed to fetch mint decimals:', error);
+  }
+
+  // Fallback: default to 6 but don't cache it so we retry next time
+  console.warn(`Could not determine decimals for mint ${key}, defaulting to 6`);
+  return 6;
+}
+
 /**
  * Get SPL token balance for a wallet using getTokenAccountBalance
  * This queries the Associated Token Account (ATA) balance
@@ -28,6 +65,11 @@ export async function getTokenBalance(
       .send();
 
     if (tokenAccountBalance.value) {
+      // Opportunistically cache decimals from the RPC response
+      const decimals = tokenAccountBalance.value.decimals;
+      if (typeof decimals === 'number') {
+        mintDecimalsCache.set(mintAddress.toString(), decimals);
+      }
       return BigInt(tokenAccountBalance.value.amount);
     }
 
@@ -117,18 +159,19 @@ export async function getTransaction(
 }
 
 /**
- * Format balance from lamports to display amount
- * Assumes 6 decimals for USDA (adjust as needed)
+ * Format balance from lamports to display amount.
+ * `decimals` is required — use getMintDecimals() to obtain it.
  */
-export function formatBalance(lamports: bigint, decimals: number = 6): number {
+export function formatBalance(lamports: bigint, decimals: number): number {
   const divisor = 10n ** BigInt(decimals);
   return Number(lamports) / Number(divisor);
 }
 
 /**
- * Convert display amount to lamports
+ * Convert display amount to lamports.
+ * `decimals` is required — use getMintDecimals() to obtain it.
  */
-export function toLamports(amount: number, decimals: number = 6): bigint {
+export function toLamports(amount: number, decimals: number): bigint {
   const multiplier = 10 ** decimals;
   return BigInt(Math.floor(amount * multiplier));
 }

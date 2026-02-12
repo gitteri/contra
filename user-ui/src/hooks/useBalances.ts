@@ -1,7 +1,7 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import type { Address } from '@solana/addresses';
 import { useSolana } from '../context/SolanaContext';
-import { getTokenBalances, formatBalance } from '../utils/queries';
+import { getTokenBalances, getMintDecimals, formatBalance } from '../utils/queries';
 import { address } from '@solana/addresses';
 
 const MINT_ADDRESS = import.meta.env.VITE_MINT_ADDRESS as string;
@@ -12,6 +12,7 @@ export function useBalances(walletAddresses: Address[]) {
   const [balances, setBalances] = useState<Map<Address, number>>(new Map());
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<Error | null>(null);
+  const decimalsRef = useRef<number | null>(null);
 
   const fetchBalances = useCallback(async () => {
     if (walletAddresses.length === 0) {
@@ -22,12 +23,19 @@ export function useBalances(walletAddresses: Address[]) {
     try {
       setError(null);
       const mintAddr = address(MINT_ADDRESS);
+
+      // Fetch decimals once and cache in ref
+      if (decimalsRef.current === null) {
+        decimalsRef.current = await getMintDecimals(mintAddr, rpc);
+      }
+      const decimals = decimalsRef.current;
+
       const rawBalances = await getTokenBalances(walletAddresses, mintAddr, rpc);
 
       // Convert to display format (number)
       const displayBalances = new Map<Address, number>();
       rawBalances.forEach((balance, addr) => {
-        displayBalances.set(addr, formatBalance(balance));
+        displayBalances.set(addr, formatBalance(balance, decimals));
       });
 
       setBalances(displayBalances);
