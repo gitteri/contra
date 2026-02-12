@@ -12,6 +12,7 @@ import { getPendingPayouts } from '../utils/contractState';
 import { formatBalance, getTokenBalance, toLamports, getMintDecimals } from '../utils/queries';
 import { useSolana } from '../context/SolanaContext';
 import { address } from '@solana/addresses';
+import { findAssociatedTokenPda } from '@solana-program/token';
 import { useAdminSigner } from './useAdminSigner';
 import { buildPayoutTransaction, buildWithdrawalTransaction, sendWithRetry, validateSolanaAddress } from '../utils/transactions';
 import { useToasts } from './useToasts';
@@ -112,6 +113,29 @@ export function useUsers() {
   // Track previous balances to detect increases
   const previousBalancesRef = useRef<Map<string, number>>(new Map());
 
+  // Precomputed ATA address -> network node ID ("admin" | user.id)
+  const ataMapRef = useRef<Map<string, string>>(new Map());
+
+  useEffect(() => {
+    if (users.length === 0) return;
+    const build = async () => {
+      const map = new Map<string, string>();
+      const mintAddr = address(import.meta.env.VITE_MINT_ADDRESS as string);
+      const tokenProgram = address('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
+      const adminAddr = getAdminAddress();
+      if (adminAddr) {
+        const [ata] = await findAssociatedTokenPda({ mint: mintAddr, owner: address(adminAddr), tokenProgram });
+        map.set(ata, 'admin');
+      }
+      for (const u of users) {
+        const [ata] = await findAssociatedTokenPda({ mint: mintAddr, owner: address(u.wallet.publicKey), tokenProgram });
+        map.set(ata, u.id);
+      }
+      ataMapRef.current = map;
+    };
+    build();
+  }, [users]);
+
   // Get all wallet addresses for balance fetching
   const walletAddresses = useMemo(() => {
     if (users.length === 0) return [];
@@ -152,12 +176,21 @@ export function useUsers() {
     const adminAddress = getAdminAddress();
     const escrowAddress = import.meta.env.VITE_INSTANCE_ADDRESS as string;
 
+    // Resolve a wallet address to a network node ID
+    const resolveNodeId = (addr: string): string | null => {
+      if (adminAddress && addr === adminAddress) return 'admin';
+      if (addr === escrowAddress) return 'escrow';
+      const user = users.find(u => u.wallet.publicKey === addr);
+      return user ? user.id : null;
+    };
+
     // Check if transaction involves escrow or any of our users
     const isEscrowTransaction = tx.from === escrowAddress || tx.to === escrowAddress;
     const involvesUser = userAddresses.includes(tx.from) || userAddresses.includes(tx.to);
     const involvesAdmin = adminAddress && (tx.from === adminAddress || tx.to === adminAddress);
+    const isKnownEscrowType = ['deposit', 'withdraw', 'mint_to', 'burn'].includes(tx.type);
 
-    if (isEscrowTransaction || involvesUser || involvesAdmin) {
+    if (isEscrowTransaction || involvesUser || involvesAdmin || isKnownEscrowType) {
       // Refetch balances for affected parties
       refetchBalances();
 
@@ -169,32 +202,74 @@ export function useUsers() {
       let networkTx: NetworkTransaction | null = null;
 
       if (tx.type === 'deposit') {
-        // Escrow deposit: Show mainnet → escrow → user
-        if (tx.to === escrowAddress) {
-          // First leg: from mainnet to escrow
+        // Deposit (from indexer): Solana-side escrow inflow only.
+        // The Contra-side distribution (escrow -> recipient) is handled
+        // by the separate mint_to event from AccountsDB.
+        addNetworkTransaction({
+          id: `${tx.signature}-deposit`,
+          from: 'offscreen-left',
+          to: 'escrow',
+          amount,
+          timestamp: performance.now(),
+        });
+
+        fetchEscrowBalance();
+      } else if (tx.type === 'withdraw') {
+        // Withdrawal (from indexer): from is the initiator wallet
+        // Animate: initiator -> escrow, then escrow -> offscreen-left
+        const initiatorNodeId = resolveNodeId(tx.from);
+        if (initiatorNodeId && initiatorNodeId !== 'escrow') {
           addNetworkTransaction({
-            id: `${tx.signature}-deposit-1`,
-            from: 'offscreen-left',
+            id: `${tx.signature}-withdraw-1`,
+            from: initiatorNodeId,
             to: 'escrow',
             amount,
             timestamp: performance.now(),
           });
-
-          // Find the recipient user (if it's for a specific user)
-          const recipientUser = users.find(u => tx.from === u.wallet.publicKey);
-          if (recipientUser) {
-            // Second leg: from escrow to user (delayed)
-            setTimeout(() => {
-              addNetworkTransaction({
-                id: `${tx.signature}-deposit-2`,
-                from: 'escrow',
-                to: recipientUser.id,
-                amount,
-                timestamp: performance.now(),
-              });
-            }, 1500);
-          }
         }
+
+        setTimeout(() => {
+          addNetworkTransaction({
+            id: `${tx.signature}-withdraw-2`,
+            from: 'escrow',
+            to: 'offscreen-left',
+            amount,
+            timestamp: performance.now(),
+          });
+        }, initiatorNodeId && initiatorNodeId !== 'escrow' ? 1500 : 0);
+
+        fetchEscrowBalance();
+      } else if (tx.type === 'mint_to') {
+        // Mint (from AccountsDB): tx.to is an ATA address
+        // Look up the ATA owner from the precomputed cache
+        const ownerNodeId = ataMapRef.current.get(tx.to);
+        if (ownerNodeId) {
+          networkTx = {
+            id: tx.signature,
+            from: 'escrow',
+            to: ownerNodeId,
+            amount,
+            timestamp: performance.now(),
+          };
+        } else {
+          console.warn('[useUsers] mint_to: unknown ATA destination', tx.to);
+        }
+
+        fetchEscrowBalance();
+      } else if (tx.type === 'burn') {
+        // Burn (from AccountsDB): tx.from is the authority wallet
+        const fromNodeId = resolveNodeId(tx.from);
+        if (fromNodeId && fromNodeId !== 'escrow') {
+          networkTx = {
+            id: tx.signature,
+            from: fromNodeId,
+            to: 'escrow',
+            amount,
+            timestamp: performance.now(),
+          };
+        }
+
+        fetchEscrowBalance();
       } else if (tx.type === 'release_funds') {
         // Payout from escrow to user
         const recipientUser = users.find(u => tx.to === u.wallet.publicKey);
@@ -207,61 +282,29 @@ export function useUsers() {
             timestamp: performance.now(),
           };
         }
+
+        if (isEscrowTransaction) fetchEscrowBalance();
       } else if (tx.type === 'transfer') {
-        // Regular transfer between users or withdrawals
-        if (tx.from === escrowAddress && !involvesUser) {
-          // Withdrawal from escrow to mainnet
+        // Regular transfer between users
+        const fromId = resolveNodeId(tx.from);
+        const toId = resolveNodeId(tx.to);
+
+        if (fromId && toId) {
           networkTx = {
             id: tx.signature,
-            from: 'escrow',
-            to: 'offscreen-left',
+            from: fromId,
+            to: toId,
             amount,
             timestamp: performance.now(),
           };
-        } else {
-          // Map addresses to user IDs or special nodes
-          let fromId = tx.from;
-          let toId = tx.to;
-
-          // Map user addresses to their IDs
-          const fromUser = users.find(u => u.wallet.publicKey === tx.from);
-          if (fromUser) fromId = fromUser.id;
-
-          const toUser = users.find(u => u.wallet.publicKey === tx.to);
-          if (toUser) toId = toUser.id;
-
-          // Map admin address
-          if (adminAddress) {
-            if (tx.from === adminAddress) fromId = 'admin';
-            if (tx.to === adminAddress) toId = 'admin';
-          }
-
-          // Map escrow address
-          if (tx.from === escrowAddress) fromId = 'escrow';
-          if (tx.to === escrowAddress) toId = 'escrow';
-
-          // Only create animation if both endpoints are known
-          if ((fromUser || fromId === 'admin' || fromId === 'escrow') && 
-              (toUser || toId === 'admin' || toId === 'escrow')) {
-            networkTx = {
-              id: tx.signature,
-              from: fromId,
-              to: toId,
-              amount,
-              timestamp: performance.now(),
-            };
-          }
         }
+
+        if (isEscrowTransaction) fetchEscrowBalance();
       }
 
       // Add the network transaction if we created one
       if (networkTx) {
         addNetworkTransaction(networkTx);
-      }
-
-      // Update escrow balance if involved
-      if (isEscrowTransaction) {
-        fetchEscrowBalance();
       }
     }
   }, [users, refetchBalances, addNetworkTransaction, fetchEscrowBalance, getMintDec]);
