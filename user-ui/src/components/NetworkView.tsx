@@ -18,7 +18,6 @@ interface NetworkViewProps {
   admin: AdminState;
   transactions: NetworkTransaction[];
   onSelectUser: (id: string) => void;
-  liveTransactionsActive?: boolean;
   escrowBalance: number;
   wsConnected?: boolean;
 }
@@ -76,14 +75,12 @@ export function NetworkView({
   admin,
   transactions,
   onSelectUser,
-  liveTransactionsActive = false,
   escrowBalance,
   wsConnected = false,
 }: NetworkViewProps) {
   const [viewMode, setViewMode] = useState<ViewMode>('network');
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [containerSize, setContainerSize] = useState({ width: 800, height: 600 });
-  const [escrowTxs, setEscrowTxs] = useState<NetworkTransaction[]>([]);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
@@ -104,7 +101,7 @@ export function NetworkView({
   const cx = containerSize.width * 0.55;
   const cy = containerSize.height / 2;
 
-  const escrowX = containerSize.width * 0.08;
+  const escrowX = isMainnet ? containerSize.width * 0.4 : containerSize.width * 0.08;
   const escrowY = cy;
 
   const radiusX = Math.min(containerSize.width, containerSize.height) * 0.34;
@@ -153,8 +150,8 @@ export function NetworkView({
 
   /* ---- Combined & visible transactions ---- */
   const allTransactions = useMemo(
-    () => [...transactions, ...escrowTxs],
-    [transactions, escrowTxs],
+    () => transactions,
+    [transactions],
   );
 
   const visibleTransactions = useMemo(() => {
@@ -198,86 +195,6 @@ export function NetworkView({
       cancelAnimationFrame(rafRef.current);
     };
   }, [allTransactions]);
-
-  /* ---- Escrow transaction generator ---- */
-  useEffect(() => {
-    if (!liveTransactionsActive) return;
-    let running = true;
-
-    function addTx(tx: NetworkTransaction) {
-      setEscrowTxs((prev) => [...prev, tx]);
-      setTimeout(() => {
-        setEscrowTxs((prev) => prev.filter((t) => t.id !== tx.id));
-      }, TX_DURATION_MS + 200);
-    }
-
-    function generate() {
-      if (!running) return;
-      const currentUsers = usersRef.current;
-      if (currentUsers.length === 0) {
-        setTimeout(generate, 2000);
-        return;
-      }
-
-      const isDeposit = Math.random() > 0.5;
-      const randomUser = currentUsers[Math.floor(Math.random() * currentUsers.length)];
-      const amount = Math.round((Math.random() * 200 + 20) * 100) / 100;
-      const baseId = `escrow-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-
-      if (isDeposit) {
-        // Leg 1: off-screen -> escrow
-        addTx({
-          id: `${baseId}-l1`,
-          from: 'offscreen-left',
-          to: 'escrow',
-          amount,
-          timestamp: performance.now(),
-        });
-        // Leg 2: escrow -> random user (after leg 1 completes)
-        setTimeout(() => {
-          if (!running) return;
-          addTx({
-            id: `${baseId}-l2`,
-            from: 'escrow',
-            to: randomUser.id,
-            amount,
-            timestamp: performance.now(),
-          });
-        }, TX_DURATION_MS + 100);
-      } else {
-        // Leg 1: random user -> escrow
-        addTx({
-          id: `${baseId}-l1`,
-          from: randomUser.id,
-          to: 'escrow',
-          amount,
-          timestamp: performance.now(),
-        });
-        // Leg 2: escrow -> off-screen (after leg 1 completes)
-        setTimeout(() => {
-          if (!running) return;
-          addTx({
-            id: `${baseId}-l2`,
-            from: 'escrow',
-            to: 'offscreen-left',
-            amount,
-            timestamp: performance.now(),
-          });
-        }, TX_DURATION_MS + 100);
-      }
-
-      const nextDelay = 3000 + Math.random() * 4000;
-      setTimeout(() => {
-        if (running) generate();
-      }, nextDelay);
-    }
-
-    const t = setTimeout(generate, 1500 + Math.random() * 1500);
-    return () => {
-      running = false;
-      clearTimeout(t);
-    };
-  }, [liveTransactionsActive]);
 
   /* ---- Handlers ---- */
   const handleNodeClick = useCallback(
@@ -510,44 +427,6 @@ export function NetworkView({
               );
             })}
           </>
-        )}
-
-        {/* ============================================================ */}
-        {/*  MAINNET MODE: privacy bubble                                 */}
-        {/* ============================================================ */}
-        {isMainnet && (
-          <g>
-            {/* Main bubble -- slightly elevated from bg, solid fill, clean border */}
-            <ellipse
-              cx={cx}
-              cy={cy}
-              rx={bubbleRx}
-              ry={bubbleRy}
-              fill="#18181f"
-              stroke={ADMIN_COLOR}
-              strokeWidth={1}
-              strokeOpacity={0.25}
-            />
-
-            <text
-              x={cx}
-              y={cy - 14}
-              textAnchor="middle"
-              dominantBaseline="central"
-              className="network-bubble-title"
-            >
-              Contra (Private)
-            </text>
-            <text
-              x={cx}
-              y={cy + 14}
-              textAnchor="middle"
-              dominantBaseline="central"
-              className="network-bubble-subtitle"
-            >
-              Transactions are not visible on mainnet
-            </text>
-          </g>
         )}
 
         {/* ============================================================ */}

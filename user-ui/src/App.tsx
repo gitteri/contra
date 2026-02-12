@@ -91,7 +91,6 @@ export default function App() {
               admin={adminState}
               transactions={networkTransactions}
               onSelectUser={setSelectedId}
-              liveTransactionsActive={liveTransactionsActive}
               escrowBalance={escrowBalance}
               wsConnected={wsConnected}
             />
