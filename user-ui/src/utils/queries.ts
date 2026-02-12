@@ -8,6 +8,12 @@ const TOKEN_PROGRAM_ADDRESS = 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA' as c
 /** Module-level cache: mint address → decimals */
 const mintDecimalsCache = new Map<string, number>();
 
+/** Known mint decimals for specific tokens */
+const KNOWN_MINT_DECIMALS: Record<string, number> = {
+  // USDA on Contra
+  'FYRfAYrmGVZ5zQV7L3CnKFvFtwCZYrDXFqFfsbMhi87g': 9,
+};
+
 /**
  * Get the decimals for a mint. Fetches from the RPC once and caches.
  * Falls back to reading the mint account directly at byte offset 44.
@@ -19,6 +25,13 @@ export async function getMintDecimals(
   const key = mintAddress.toString();
   const cached = mintDecimalsCache.get(key);
   if (cached !== undefined) return cached;
+
+  // Check if we have a known value for this mint
+  const known = KNOWN_MINT_DECIMALS[key];
+  if (known !== undefined) {
+    mintDecimalsCache.set(key, known);
+    return known;
+  }
 
   try {
     const response = await (rpc as any).getAccountInfo(mintAddress, {
@@ -37,9 +50,9 @@ export async function getMintDecimals(
     console.error('Failed to fetch mint decimals:', error);
   }
 
-  // Fallback: default to 6 but don't cache it so we retry next time
-  console.warn(`Could not determine decimals for mint ${key}, defaulting to 6`);
-  return 6;
+  // Fallback: default to 9 but don't cache it so we retry next time
+  console.warn(`Could not determine decimals for mint ${key}, defaulting to 9`);
+  return 9;
 }
 
 /**

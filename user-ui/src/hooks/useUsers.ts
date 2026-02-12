@@ -144,7 +144,7 @@ export function useUsers() {
   }, [rpc, getMintDec]);
 
   // Handle incoming transactions from WebSocket
-  const handleWebSocketTransaction = useCallback((tx: ContraTransaction) => {
+  const handleWebSocketTransaction = useCallback(async (tx: ContraTransaction) => {
     console.log('[useUsers] Received transaction:', tx);
 
     // Get all relevant addresses
@@ -161,8 +161,9 @@ export function useUsers() {
       // Refetch balances for affected parties
       refetchBalances();
 
-      // Parse amount from string (it's in lamports)
-      const amount = tx.amount ? parseFloat(tx.amount) / 1e9 : 0; // Convert from lamports to tokens
+      // Parse amount from string (it's in lamports) - use actual mint decimals
+      const decimals = await getMintDec();
+      const amount = tx.amount ? formatBalance(BigInt(tx.amount), decimals) : 0;
 
       // Determine the proper routing for network animation
       let networkTx: NetworkTransaction | null = null;
@@ -263,7 +264,7 @@ export function useUsers() {
         fetchEscrowBalance();
       }
     }
-  }, [users, refetchBalances, addNetworkTransaction, fetchEscrowBalance]);
+  }, [users, refetchBalances, addNetworkTransaction, fetchEscrowBalance, getMintDec]);
 
   // Connect to WebSocket (always active for real data)
   const { isConnected: wsConnected } = useContraWebSocket(handleWebSocketTransaction, true);
