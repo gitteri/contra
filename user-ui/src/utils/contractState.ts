@@ -1,5 +1,7 @@
 import type { Address } from '@solana/addresses';
+import { address } from '@solana/addresses';
 import type { Rpc } from '@solana/rpc';
+import { getMintDecimals } from './queries';
 
 /**
  * Get pending payout for a user from escrow contract
@@ -15,7 +17,7 @@ import type { Rpc } from '@solana/rpc';
 export async function getPendingPayout(
   _userAddress: Address,
   _instanceAddress: Address,
-  _rpc: Rpc<any>
+  rpc: Rpc<any>
 ): Promise<bigint> {
   try {
     // TODO: Implement based on escrow program structure
@@ -27,8 +29,12 @@ export async function getPendingPayout(
     console.warn('getPendingPayout not yet implemented - returning mock data');
 
     // For now, return random mock pending amount for demo
+    // Use actual mint decimals instead of hardcoding
+    const mintAddress = address(import.meta.env.VITE_MINT_ADDRESS as string);
+    const decimals = await getMintDecimals(mintAddress, rpc);
     const mockPending = Math.floor(Math.random() * 100);
-    return BigInt(mockPending * 1_000_000); // Convert to lamports (6 decimals)
+    const multiplier = 10n ** BigInt(decimals);
+    return BigInt(mockPending) * multiplier;
   } catch (error) {
     console.error('Failed to fetch pending payout:', error);
     return 0n;
