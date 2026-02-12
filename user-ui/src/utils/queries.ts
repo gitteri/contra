@@ -8,15 +8,13 @@ const TOKEN_PROGRAM_ADDRESS = 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA' as c
 /** Module-level cache: mint address → decimals */
 const mintDecimalsCache = new Map<string, number>();
 
-/** Known mint decimals for specific tokens */
-const KNOWN_MINT_DECIMALS: Record<string, number> = {
-  // USDA on Contra
-  'FYRfAYrmGVZ5zQV7L3CnKFvFtwCZYrDXFqFfsbMhi87g': 9,
-};
-
 /**
  * Get the decimals for a mint. Fetches from the RPC once and caches.
- * Falls back to reading the mint account directly at byte offset 44.
+ * Tries multiple methods:
+ * 1. Check cache
+ * 2. Try getAccountInfo to read mint account data
+ * 3. Try getSplTokenSupply which returns decimals
+ * 4. Throw error - decimals are required
  */
 export async function getMintDecimals(
   mintAddress: Address,
@@ -26,13 +24,7 @@ export async function getMintDecimals(
   const cached = mintDecimalsCache.get(key);
   if (cached !== undefined) return cached;
 
-  // Check if we have a known value for this mint
-  const known = KNOWN_MINT_DECIMALS[key];
-  if (known !== undefined) {
-    mintDecimalsCache.set(key, known);
-    return known;
-  }
-
+  // Method 1: Try getAccountInfo
   try {
     const response = await (rpc as any).getAccountInfo(mintAddress, {
       encoding: 'base64',
@@ -43,16 +35,56 @@ export async function getMintDecimals(
       if (data.length >= 45) {
         const decimals = data[44];
         mintDecimalsCache.set(key, decimals);
+        console.log(`[getMintDecimals] Fetched decimals for ${key}: ${decimals}`);
         return decimals;
       }
     }
   } catch (error) {
-    console.error('Failed to fetch mint decimals:', error);
+    console.warn('getAccountInfo failed, trying getSplTokenSupply:', error);
   }
 
-  // Fallback: default to 9 but don't cache it so we retry next time
-  console.warn(`Could not determine decimals for mint ${key}, defaulting to 9`);
-  return 9;
+  // Method 2: Try getTokenSupply
+  try {
+    const supply = await (rpc as any).getTokenSupply(mintAddress).send();
+    if (supply?.value?.decimals !== undefined) {
+      const decimals = supply.value.decimals;
+      mintDecimalsCache.set(key, decimals);
+      console.log(`[getMintDecimals] Fetched decimals via getTokenSupply for ${key}: ${decimals}`);
+      return decimals;
+    }
+  } catch (error) {
+    console.warn('getTokenSupply failed:', error);
+  }
+
+  // Method 3: Try getting decimals from a token account balance
+  // Use the admin wallet as a known holder
+  try {
+    const adminWallet = import.meta.env.VITE_ADMIN_WALLET;
+    if (adminWallet) {
+      const adminAddress = address(adminWallet);
+      const [ata] = await findAssociatedTokenPda({
+        mint: mintAddress,
+        owner: adminAddress,
+        tokenProgram: address(TOKEN_PROGRAM_ADDRESS),
+      });
+
+      const tokenAccountBalance = await (rpc as any)
+        .getTokenAccountBalance(ata)
+        .send();
+
+      if (tokenAccountBalance.value?.decimals !== undefined) {
+        const decimals = tokenAccountBalance.value.decimals;
+        mintDecimalsCache.set(key, decimals);
+        console.log(`[getMintDecimals] Fetched decimals via token account for ${key}: ${decimals}`);
+        return decimals;
+      }
+    }
+  } catch (error) {
+    console.warn('getTokenAccountBalance fallback failed:', error);
+  }
+
+  // If all methods fail, throw an error - we need accurate decimals
+  throw new Error(`Could not determine decimals for mint ${key}. Please ensure the RPC supports getAccountInfo, getTokenSupply, or getTokenAccountBalance.`);
 }
 
 /**
