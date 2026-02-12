@@ -16,6 +16,7 @@ use {
     serde::Serialize,
     solana_sdk::{message::VersionedMessage, pubkey::Pubkey, signature::Signature},
     solana_transaction_status_client_types::option_serializer::OptionSerializer,
+    sqlx::{postgres::PgPoolOptions, FromRow, PgPool},
     std::{net::SocketAddr, sync::Arc, time::Duration},
     tokio::{signal, sync::broadcast},
     tower_http::cors::{Any, CorsLayer},
@@ -70,9 +71,13 @@ struct Args {
     #[arg(short, long, env = "PORT")]
     port: Option<u16>,
 
-    /// PostgreSQL connection URL (read replica)
+    /// PostgreSQL connection URL (Contra read replica — for mint/burn/transfer)
     #[arg(long, env = "STREAMER_ACCOUNTSDB_CONNECTION_URL")]
     accountsdb_connection_url: String,
+
+    /// Indexer PostgreSQL connection URL (for escrow deposits/withdrawals)
+    #[arg(long, env = "STREAMER_DATABASE_URL")]
+    database_url: Option<String>,
 
     /// Poll interval in milliseconds
     #[arg(long, default_value_t = 700, env = "STREAMER_POLL_INTERVAL_MS")]
@@ -209,7 +214,9 @@ fn parse_escrow_instruction(
     }
 }
 
-/// Parse an SPL Token program instruction (Transfer / TransferChecked).
+/// Parse an SPL Token program instruction.
+///
+/// Supported: Transfer(3), MintTo(7), Burn(8), TransferChecked(12), MintToChecked(14), BurnChecked(15)
 fn parse_spl_token_instruction(
     data: &[u8],
     account_keys: &[Pubkey],
@@ -241,6 +248,34 @@ fn parse_spl_token_instruction(
                 mint,
             })
         }
+        // MintTo: disc=7, [mint, dest, authority], data: [disc(1), amount(8)]
+        7 if data.len() >= 9 => {
+            let amt = u64::from_le_bytes(data[1..9].try_into().unwrap_or([0u8; 8]));
+            let from = resolve_key(account_keys, ix_accounts, 2); // mint authority
+            let to = resolve_key(account_keys, ix_accounts, 1); // destination token account
+            let mint = Some(resolve_key(account_keys, ix_accounts, 0)); // mint
+            Some(ParsedInstruction {
+                tx_type: "mint_to".into(),
+                from,
+                to,
+                amount: Some(amt.to_string()),
+                mint,
+            })
+        }
+        // Burn: disc=8, [source, mint, authority], data: [disc(1), amount(8)]
+        8 if data.len() >= 9 => {
+            let amt = u64::from_le_bytes(data[1..9].try_into().unwrap_or([0u8; 8]));
+            let from = resolve_key(account_keys, ix_accounts, 2); // authority (burner)
+            let to = resolve_key(account_keys, ix_accounts, 0); // source token account
+            let mint = Some(resolve_key(account_keys, ix_accounts, 1)); // mint
+            Some(ParsedInstruction {
+                tx_type: "burn".into(),
+                from,
+                to,
+                amount: Some(amt.to_string()),
+                mint,
+            })
+        }
         // TransferChecked: disc=12, [source, mint, dest, authority], data: [disc(1), amount(8), decimals(1)]
         12 if data.len() >= 10 => {
             let amt = u64::from_le_bytes(data[1..9].try_into().unwrap_or([0u8; 8]));
@@ -249,6 +284,34 @@ fn parse_spl_token_instruction(
             let mint = Some(resolve_key(account_keys, ix_accounts, 1));
             Some(ParsedInstruction {
                 tx_type: "transfer".into(),
+                from,
+                to,
+                amount: Some(amt.to_string()),
+                mint,
+            })
+        }
+        // MintToChecked: disc=14, [mint, dest, authority], data: [disc(1), amount(8), decimals(1)]
+        14 if data.len() >= 10 => {
+            let amt = u64::from_le_bytes(data[1..9].try_into().unwrap_or([0u8; 8]));
+            let from = resolve_key(account_keys, ix_accounts, 2); // mint authority
+            let to = resolve_key(account_keys, ix_accounts, 1); // destination token account
+            let mint = Some(resolve_key(account_keys, ix_accounts, 0)); // mint
+            Some(ParsedInstruction {
+                tx_type: "mint_to".into(),
+                from,
+                to,
+                amount: Some(amt.to_string()),
+                mint,
+            })
+        }
+        // BurnChecked: disc=15, [source, mint, authority], data: [disc(1), amount(8), decimals(1)]
+        15 if data.len() >= 10 => {
+            let amt = u64::from_le_bytes(data[1..9].try_into().unwrap_or([0u8; 8]));
+            let from = resolve_key(account_keys, ix_accounts, 2); // authority (burner)
+            let to = resolve_key(account_keys, ix_accounts, 0); // source token account
+            let mint = Some(resolve_key(account_keys, ix_accounts, 1)); // mint
+            Some(ParsedInstruction {
+                tx_type: "burn".into(),
                 from,
                 to,
                 amount: Some(amt.to_string()),
@@ -328,7 +391,107 @@ fn parse_stored_transaction(
 }
 
 // ---------------------------------------------------------------------------
-// Poller — watches for new blocks and broadcasts parsed transactions
+// Indexer row type (escrow deposits / withdrawals)
+// ---------------------------------------------------------------------------
+#[derive(FromRow, Debug)]
+struct IndexerTxRow {
+    id: i64,
+    signature: String,
+    slot: i64,
+    initiator: String,
+    recipient: String,
+    mint: String,
+    amount: i64,
+    transaction_type: String,
+    status: String,
+    created_at_epoch: i64,
+}
+
+// ---------------------------------------------------------------------------
+// Poller — indexer DB for escrow deposits / withdrawals
+// ---------------------------------------------------------------------------
+
+async fn poll_indexer(
+    pool: PgPool,
+    tx_sender: broadcast::Sender<String>,
+    poll_interval: Duration,
+) {
+    let mut last_seen_id: i64 = sqlx::query_scalar::<_, Option<i64>>(
+        "SELECT MAX(id) FROM transactions",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap_or(Some(0))
+    .unwrap_or(0);
+
+    info!("[indexer] Starting poller from transaction id {}", last_seen_id);
+
+    loop {
+        tokio::time::sleep(poll_interval).await;
+
+        let rows = match sqlx::query_as::<_, IndexerTxRow>(
+            r#"
+            SELECT id, signature, slot, initiator, recipient, mint, amount,
+                   transaction_type::text as transaction_type,
+                   status::text as status,
+                   EXTRACT(EPOCH FROM created_at)::bigint as created_at_epoch
+            FROM transactions
+            WHERE id > $1
+            ORDER BY id ASC
+            LIMIT 100
+            "#,
+        )
+        .bind(last_seen_id)
+        .fetch_all(&pool)
+        .await
+        {
+            Ok(rows) => rows,
+            Err(e) => {
+                error!("[indexer] Failed to poll: {}", e);
+                continue;
+            }
+        };
+
+        if rows.is_empty() {
+            continue;
+        }
+
+        for row in rows {
+            last_seen_id = row.id;
+
+            // Map DB enum "withdrawal" -> "withdraw" for frontend compatibility
+            let tx_type = match row.transaction_type.as_str() {
+                "withdrawal" => "withdraw",
+                other => other,
+            };
+
+            let streamed = StreamedTransaction {
+                signature: row.signature,
+                chain: "contra".into(),
+                tx_type: tx_type.to_string(),
+                from: row.initiator,
+                to: row.recipient,
+                amount: Some(row.amount.to_string()),
+                mint: Some(row.mint),
+                timestamp: row.created_at_epoch,
+                status: row.status,
+                slot: row.slot as u64,
+            };
+
+            match serde_json::to_string(&streamed) {
+                Ok(json) => {
+                    debug!("[indexer] Broadcasting {}: {}", streamed.signature, streamed.tx_type);
+                    let _ = tx_sender.send(json);
+                }
+                Err(e) => error!("Failed to serialize: {}", e),
+            }
+        }
+        debug!("[indexer] Polled up to id {}", last_seen_id);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Poller — AccountsDB for Contra-internal transactions (mint/burn/transfer)
 // ---------------------------------------------------------------------------
 
 async fn poll_loop(
@@ -530,13 +693,36 @@ async fn main() {
 
     info!("Connected to accounts database");
 
+    // Optionally connect to the indexer DB (for escrow deposits/withdrawals)
+    let indexer_pool = if let Some(ref db_url) = args.database_url {
+        let pool = PgPoolOptions::new()
+            .max_connections(5)
+            .connect(db_url)
+            .await
+            .expect("Failed to connect to indexer database");
+        info!("Connected to indexer database");
+        Some(pool)
+    } else {
+        warn!("No STREAMER_DATABASE_URL set — escrow deposit/withdrawal streaming disabled");
+        None
+    };
+
     // Broadcast channel — 4096 buffered messages before lagging.
     // Keep _keep_alive so the channel never transitions to "closed"
     // (which would happen if all receivers are dropped).
     let (tx_sender, _keep_alive) = broadcast::channel::<String>(4096);
 
-    // Spawn the poller
     let poll_interval = Duration::from_millis(args.poll_interval_ms);
+
+    // Spawn indexer poller (deposits / withdrawals)
+    if let Some(pool) = indexer_pool {
+        let indexer_tx = tx_sender.clone();
+        tokio::spawn(async move {
+            poll_indexer(pool, indexer_tx, poll_interval).await;
+        });
+    }
+
+    // Spawn AccountsDB poller (mint / burn / transfer on Contra)
     let poller_db = accounts_db.clone();
     let poller_tx = tx_sender.clone();
     tokio::spawn(async move {
