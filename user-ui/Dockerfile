@@ -10,12 +10,21 @@ RUN npm install -g pnpm@latest
 
 WORKDIR /app
 
+# Copy generated TypeScript clients (needed for @contra-escrow / @contra-withdraw aliases)
+COPY contra-escrow-program/clients/typescript /app/contra-escrow-program/clients/typescript
+COPY contra-withdraw-program/clients/typescript /app/contra-withdraw-program/clients/typescript
+
 # Copy user-ui source
 COPY user-ui /app/user-ui
 
 WORKDIR /app/user-ui
 
 RUN pnpm install --frozen-lockfile
+
+# The generated TS clients import @solana/kit etc. but have no node_modules.
+# Symlink user-ui's node_modules so tsc can resolve deps from the client paths.
+RUN ln -s /app/user-ui/node_modules /app/contra-escrow-program/clients/typescript/node_modules && \
+    ln -s /app/user-ui/node_modules /app/contra-withdraw-program/clients/typescript/node_modules
 
 # CONTRA_WS_URL must be baked in at build time because the browser connects
 # directly to the streamer WebSocket (not proxied through server.mjs).
