@@ -26,10 +26,20 @@ RUN pnpm install --frozen-lockfile
 RUN ln -s /app/user-ui/node_modules /app/contra-escrow-program/clients/typescript/node_modules && \
     ln -s /app/user-ui/node_modules /app/contra-withdraw-program/clients/typescript/node_modules
 
-# CONTRA_WS_URL must be baked in at build time because the browser connects
-# directly to the streamer WebSocket (not proxied through server.mjs).
+# VITE_* vars are baked into the JS bundle at build time by Vite.
+# Set these as Railway service variables -- Railway passes them as Docker build args.
 ARG CONTRA_WS_URL=""
+ARG VITE_ADMIN_WALLET=""
+ARG VITE_MINT_ADDRESS=""
+ARG VITE_INSTANCE_ADDRESS=""
+ARG VITE_ADMIN_PRIVATE_KEY=""
+
 ENV CONTRA_WS_URL=${CONTRA_WS_URL}
+ENV VITE_ADMIN_WALLET=${VITE_ADMIN_WALLET}
+ENV VITE_MINT_ADDRESS=${VITE_MINT_ADDRESS}
+ENV VITE_INSTANCE_ADDRESS=${VITE_INSTANCE_ADDRESS}
+ENV VITE_ADMIN_PRIVATE_KEY=${VITE_ADMIN_PRIVATE_KEY}
+
 RUN pnpm build
 
 # Production: lightweight server that serves static files + proxies RPC
