@@ -76,7 +76,7 @@ export function StatusChecker({ instancePubkey }: StatusCheckerProps) {
       <div className="function-section">
         <h3>Check Mint Status</h3>
         <div className="input-group">
-          <input
+          <input autoComplete="off" data-1p-ignore
             type="text"
             value={mintToCheck}
             onChange={(e) => setMintToCheck(e.target.value)}
@@ -92,10 +92,10 @@ export function StatusChecker({ instancePubkey }: StatusCheckerProps) {
           </button>
         </div>
         {mintStatus && (
-          <div className={`info-row`} style={{ marginTop: '1rem', padding: '1rem', borderRadius: '8px', backgroundColor: mintStatus.allowed ? 'rgba(76, 175, 80, 0.1)' : 'rgba(255, 152, 0, 0.1)' }}>
+          <div className={`status-result ${mintStatus.allowed ? 'status-result-success' : 'status-result-warning'}`}>
             <span className="info-label">Status:</span>
-            <span className="info-value" style={{ fontWeight: 'bold', color: mintStatus.allowed ? '#4caf50' : '#ff9800' }}>
-              {mintStatus.allowed ? 'ALLOWED' : 'NOT ALLOWED'}
+            <span className={`status-badge ${mintStatus.allowed ? 'status-badge-success' : 'status-badge-warning'}`}>
+              {mintStatus.allowed ? 'Allowed' : 'Not Allowed'}
             </span>
           </div>
         )}
@@ -104,7 +104,7 @@ export function StatusChecker({ instancePubkey }: StatusCheckerProps) {
       <div className="function-section">
         <h3>Check Operator Status</h3>
         <div className="input-group">
-          <input
+          <input autoComplete="off" data-1p-ignore
             type="text"
             value={operatorToCheck}
             onChange={(e) => setOperatorToCheck(e.target.value)}
@@ -120,10 +120,10 @@ export function StatusChecker({ instancePubkey }: StatusCheckerProps) {
           </button>
         </div>
         {operatorStatus && (
-          <div className={`info-row`} style={{ marginTop: '1rem', padding: '1rem', borderRadius: '8px', backgroundColor: operatorStatus.authorized ? 'rgba(76, 175, 80, 0.1)' : 'rgba(255, 152, 0, 0.1)' }}>
+          <div className={`status-result ${operatorStatus.authorized ? 'status-result-success' : 'status-result-warning'}`}>
             <span className="info-label">Status:</span>
-            <span className="info-value" style={{ fontWeight: 'bold', color: operatorStatus.authorized ? '#4caf50' : '#ff9800' }}>
-              {operatorStatus.authorized ? 'AUTHORIZED' : 'NOT AUTHORIZED'}
+            <span className={`status-badge ${operatorStatus.authorized ? 'status-badge-success' : 'status-badge-warning'}`}>
+              {operatorStatus.authorized ? 'Authorized' : 'Not Authorized'}
             </span>
           </div>
         )}

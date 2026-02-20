@@ -3,6 +3,7 @@ import { useSolana } from '../hooks/useSolana';
 import { useWallet } from '../hooks/useWallet';
 import { useWalletStandardAccount } from '../hooks/useWalletStandardAccount';
 import { useCluster } from '../hooks/useCluster';
+import { useLocalStorage, useRecentItems } from '../hooks/useLocalStorage';
 import { address } from '@solana/addresses';
 import { useWalletAccountTransactionSendingSigner } from '@solana/react';
 import { getBase58Decoder } from '@solana/codecs-strings';
@@ -53,15 +54,20 @@ function OperatorFunctionsContent({ instancePubkey, account, network }: Operator
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState<string | null>(null);
-  const [mintAddress, setMintAddress] = useState('');
+  const [savedMint] = useLocalStorage<string>('lastMintAddress', '');
+  const [mintAddress, setMintAddress] = useState(savedMint);
   const [userAddress, setUserAddress] = useState('');
   const [amount, setAmount] = useState('');
   const [newWithdrawalRoot, setNewWithdrawalRoot] = useState('');
   const [transactionNonce, setTransactionNonce] = useState('');
   const [siblingProofs, setSiblingProofs] = useState('');
+  const [recentMints] = useRecentItems('recentMints', 5);
 
   const chainId = (network === 'localnet' ? 'solana:devnet' : `solana:${network}`) as `solana:${string}`;
   const transactionSigner = useWalletAccountTransactionSendingSigner(account, chainId);
+
+  const truncateAddress = (addr: string) =>
+    addr.length > 12 ? `${addr.slice(0, 6)}...${addr.slice(-4)}` : addr;
 
   const handleReleaseFunds = async () => {
     if (!mintAddress || !userAddress || !amount || !newWithdrawalRoot || !transactionNonce || !siblingProofs) {
@@ -208,13 +214,9 @@ function OperatorFunctionsContent({ instancePubkey, account, network }: Operator
       {error && <div className="error-message">{error}</div>}
 
       {success && (
-        <div style={{ marginTop: '1rem', padding: '1rem', backgroundColor: 'rgba(76, 175, 80, 0.2)', borderRadius: '8px' }}>
-          <p style={{ margin: 0, color: '#4caf50', fontWeight: 'bold', marginBottom: '0.5rem' }}>
-            {success.split('!')[0]}!
-          </p>
-          <p style={{ margin: 0, fontSize: '0.85rem', wordBreak: 'break-all' }}>
-            Signature: {success.split('Signature: ')[1]}
-          </p>
+        <div className="alert alert-success">
+          <span className="alert-title">{success.split('!')[0]}!</span>
+          <span className="alert-body">Signature: {success.split('Signature: ')[1]}</span>
         </div>
       )}
 
@@ -222,17 +224,34 @@ function OperatorFunctionsContent({ instancePubkey, account, network }: Operator
         <h3>Release Funds</h3>
         <div className="form-group">
           <label>Mint Address</label>
-          <input
+          <input autoComplete="off" data-1p-ignore
             type="text"
             value={mintAddress}
             onChange={(e) => setMintAddress(e.target.value)}
             placeholder="Enter token mint address"
             className="input"
           />
+          {recentMints.length > 0 && (
+            <div className="recent-items recent-items-inline">
+              <span className="recent-label">Recent mints</span>
+              <div className="recent-list">
+                {recentMints.map((addr) => (
+                  <button
+                    key={addr}
+                    className="recent-item"
+                    onClick={() => setMintAddress(addr)}
+                    title={addr}
+                  >
+                    <span className="recent-item-text">{truncateAddress(addr)}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
         <div className="form-group">
           <label>User Address</label>
-          <input
+          <input autoComplete="off" data-1p-ignore
             type="text"
             value={userAddress}
             onChange={(e) => setUserAddress(e.target.value)}
@@ -242,7 +261,7 @@ function OperatorFunctionsContent({ instancePubkey, account, network }: Operator
         </div>
         <div className="form-group">
           <label>Amount</label>
-          <input
+          <input autoComplete="off" data-1p-ignore
             type="number"
             value={amount}
             onChange={(e) => setAmount(e.target.value)}
@@ -252,7 +271,7 @@ function OperatorFunctionsContent({ instancePubkey, account, network }: Operator
         </div>
         <div className="form-group">
           <label>New Withdrawal Root (32 bytes hex)</label>
-          <input
+          <input autoComplete="off" data-1p-ignore
             type="text"
             value={newWithdrawalRoot}
             onChange={(e) => setNewWithdrawalRoot(e.target.value)}
@@ -262,7 +281,7 @@ function OperatorFunctionsContent({ instancePubkey, account, network }: Operator
         </div>
         <div className="form-group">
           <label>Transaction Nonce</label>
-          <input
+          <input autoComplete="off" data-1p-ignore
             type="number"
             value={transactionNonce}
             onChange={(e) => setTransactionNonce(e.target.value)}
@@ -272,7 +291,7 @@ function OperatorFunctionsContent({ instancePubkey, account, network }: Operator
         </div>
         <div className="form-group">
           <label>Sibling Proofs (512 bytes hex)</label>
-          <textarea
+          <textarea autoComplete="off" data-1p-ignore
             value={siblingProofs}
             onChange={(e) => setSiblingProofs(e.target.value)}
             placeholder="0x..."

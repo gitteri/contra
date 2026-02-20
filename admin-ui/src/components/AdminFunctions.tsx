@@ -3,6 +3,7 @@ import { useSolana } from '../hooks/useSolana';
 import { useWallet } from '../hooks/useWallet';
 import { useWalletStandardAccount } from '../hooks/useWalletStandardAccount';
 import { useCluster } from '../hooks/useCluster';
+import { useLocalStorage, useRecentItems } from '../hooks/useLocalStorage';
 import { address } from '@solana/addresses';
 import { useWalletAccountTransactionSendingSigner } from '@solana/react';
 import { getBase58Decoder } from '@solana/codecs-strings';
@@ -63,14 +64,19 @@ function AdminFunctionsContent({ instancePubkey, account, network }: AdminFuncti
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState<string | null>(null);
-  const [mintAddress, setMintAddress] = useState('');
+  const [savedMint] = useLocalStorage<string>('lastMintAddress', '');
+  const [mintAddress, setMintAddress] = useState(savedMint);
   const [operatorAddress, setOperatorAddress] = useState('');
   const [newAdminAddress, setNewAdminAddress] = useState('');
   const [newMintDecimals, setNewMintDecimals] = useState(9);
   const [createdMintAddress, setCreatedMintAddress] = useState<string | null>(null);
+  const [recentMints, addRecentMint] = useRecentItems('recentMints', 5);
 
   const chainId = (network === 'localnet' ? 'solana:devnet' : `solana:${network}`) as `solana:${string}`;
   const transactionSigner = useWalletAccountTransactionSendingSigner(account, chainId);
+
+  const truncateAddress = (addr: string) =>
+    addr.length > 12 ? `${addr.slice(0, 6)}...${addr.slice(-4)}` : addr;
 
   const handleAllowMint = async () => {
     if (!mintAddress) {
@@ -117,6 +123,7 @@ function AdminFunctionsContent({ instancePubkey, account, network }: AdminFuncti
 
       console.log('Transaction sent with signature:', signature);
 
+      addRecentMint(mintAddress);
       setSuccess(`Mint allowed successfully! Signature: ${signature}`);
       setMintAddress('');
 
@@ -359,6 +366,7 @@ function AdminFunctionsContent({ instancePubkey, account, network }: AdminFuncti
       console.log('Mint created with signature:', signature);
 
       setCreatedMintAddress(mint.address);
+      addRecentMint(mint.address);
       setSuccess(`Mint created successfully! Signature: ${signature}`);
 
     } catch (err) {
@@ -377,13 +385,9 @@ function AdminFunctionsContent({ instancePubkey, account, network }: AdminFuncti
       {error && <div className="error-message">{error}</div>}
 
       {success && (
-        <div style={{ marginTop: '1rem', padding: '1rem', backgroundColor: 'rgba(76, 175, 80, 0.2)', borderRadius: '8px' }}>
-          <p style={{ margin: 0, color: '#4caf50', fontWeight: 'bold', marginBottom: '0.5rem' }}>
-            {success.split('!')[0]}!
-          </p>
-          <p style={{ margin: 0, fontSize: '0.85rem', wordBreak: 'break-all' }}>
-            Signature: {success.split('Signature: ')[1]}
-          </p>
+        <div className="alert alert-success">
+          <span className="alert-title">{success.split('!')[0]}!</span>
+          <span className="alert-body">Signature: {success.split('Signature: ')[1]}</span>
         </div>
       )}
 
@@ -391,13 +395,30 @@ function AdminFunctionsContent({ instancePubkey, account, network }: AdminFuncti
         <h3>Mint Management</h3>
         <div className="form-group">
           <label>Mint Address</label>
-          <input
+          <input autoComplete="off" data-1p-ignore
             type="text"
             value={mintAddress}
             onChange={(e) => setMintAddress(e.target.value)}
             placeholder="Enter token mint address"
             className="input"
           />
+          {recentMints.length > 0 && (
+            <div className="recent-items recent-items-inline">
+              <span className="recent-label">Recent mints</span>
+              <div className="recent-list">
+                {recentMints.map((addr) => (
+                  <button
+                    key={addr}
+                    className="recent-item"
+                    onClick={() => setMintAddress(addr)}
+                    title={addr}
+                  >
+                    <span className="recent-item-text">{truncateAddress(addr)}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
         <div className="button-group">
           <button
@@ -421,7 +442,7 @@ function AdminFunctionsContent({ instancePubkey, account, network }: AdminFuncti
         <h3>Operator Management</h3>
         <div className="form-group">
           <label>Operator Address</label>
-          <input
+          <input autoComplete="off" data-1p-ignore
             type="text"
             value={operatorAddress}
             onChange={(e) => setOperatorAddress(e.target.value)}
@@ -451,7 +472,7 @@ function AdminFunctionsContent({ instancePubkey, account, network }: AdminFuncti
         <h3>Admin Transfer</h3>
         <div className="form-group">
           <label>New Admin Address</label>
-          <input
+          <input autoComplete="off" data-1p-ignore
             type="text"
             value={newAdminAddress}
             onChange={(e) => setNewAdminAddress(e.target.value)}
@@ -473,7 +494,7 @@ function AdminFunctionsContent({ instancePubkey, account, network }: AdminFuncti
         <p className="info-text">Create a new SPL token mint for testing purposes. You will be set as the mint authority and freeze authority.</p>
         <div className="form-group">
           <label>Decimals</label>
-          <input
+          <input autoComplete="off" data-1p-ignore
             type="number"
             value={newMintDecimals}
             onChange={(e) => setNewMintDecimals(Math.max(0, Math.min(9, parseInt(e.target.value) || 0)))}
@@ -482,8 +503,8 @@ function AdminFunctionsContent({ instancePubkey, account, network }: AdminFuncti
             placeholder="Enter decimals (e.g., 9)"
             className="input"
           />
-          <p className="info-text" style={{ marginTop: '0.5rem', fontSize: '0.85rem' }}>
-            Standard tokens use 9 decimals. NFTs typically use 0 decimals.
+          <p className="info-text">
+            Standard tokens use 9 decimals. NFTs typically use 0.
           </p>
         </div>
         <button
@@ -494,17 +515,10 @@ function AdminFunctionsContent({ instancePubkey, account, network }: AdminFuncti
           {loading ? 'Creating...' : 'Create Mint'}
         </button>
         {createdMintAddress && (
-          <div style={{ marginTop: '1rem', padding: '1rem', backgroundColor: 'rgba(33, 150, 243, 0.2)', borderRadius: '8px' }}>
-            <p style={{ margin: 0, color: '#2196f3', fontWeight: 'bold', marginBottom: '0.5rem' }}>
-              Mint Created Successfully!
-            </p>
-            <div className="info-row">
-              <span className="info-label">Mint Address:</span>
-              <span className="info-value mono" style={{ wordBreak: 'break-all' }}>{createdMintAddress}</span>
-            </div>
-            <p className="info-text" style={{ marginTop: '0.5rem', fontSize: '0.85rem' }}>
-              Copy this address to use in the "Allow Mint" section above or in the Mint Management tab to mint tokens.
-            </p>
+          <div className="alert alert-info">
+            <span className="alert-title">Mint Created</span>
+            <span className="alert-body">{createdMintAddress}</span>
+            <span className="info-text">Copy this address for the Allow Mint section or the Mint tab.</span>
           </div>
         )}
       </div>

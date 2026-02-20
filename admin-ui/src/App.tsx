@@ -8,57 +8,61 @@ import { UserFunctions } from "./components/UserFunctions";
 import { StatusChecker } from "./components/StatusChecker";
 import { MintManager } from "./components/MintManager";
 import { ContraManagement } from "./components/ContraManagement";
+import { ActivityFeed } from "./components/ActivityFeed";
+import { ActivityStats } from "./components/ActivityStats";
+import { PayoutManager } from "./components/PayoutManager";
 import { useWallet } from "./hooks/useWallet";
 import { useCluster } from "./hooks/useCluster";
+import { useLocalStorage } from "./hooks/useLocalStorage";
+import { useActivityFeed } from "./hooks/useActivityFeed";
 import type { NetworkType } from "./context/ClusterContext";
 import { createSolanaRpc } from "@solana/rpc";
 import { createSolanaRpcSubscriptions } from "@solana/rpc-subscriptions";
 import { SolanaContext } from "./context/SolanaContext";
 
-type TabType = "escrow" | "mint" | "contra";
+type TabType = "escrow" | "mint" | "contra" | "activity" | "payout";
+type EscrowSection = "admin" | "operator" | "user" | "status";
 
 function AppContent() {
   const { connected, publicKey } = useWallet();
   const { network, setNetwork } = useCluster();
   const [instancePubkey, setInstancePubkey] = useState<string>("");
-  const [activeTab, setActiveTab] = useState<TabType>("escrow");
+  const [activeTab, setActiveTab] = useLocalStorage<TabType>("activeTab", "escrow");
+  const [escrowSection, setEscrowSection] = useLocalStorage<EscrowSection>("escrowSection", "admin");
+
+  const { transactions, stats, isPolling, start, stop, mintDecimals } = useActivityFeed(
+    instancePubkey || null
+  );
 
   return (
     <div className="app-container">
       <header className="app-header">
-        <h1>Contra Admin UI</h1>
-        <div
-          className="header-actions"
-          style={{ display: "flex", gap: "1rem", alignItems: "center" }}
-        >
+        <h1>Contra</h1>
+        <div className="header-actions">
           <select
             value={network}
             onChange={(e) => setNetwork(e.target.value as NetworkType)}
-            className="input"
-            style={{ padding: "0.5rem", minWidth: "120px" }}
+            className="network-select"
           >
             <option value="devnet">Devnet</option>
             <option value="testnet">Testnet</option>
             <option value="mainnet-beta">Mainnet</option>
             <option value="localnet">Localnet</option>
           </select>
-          <div style={{ minWidth: "200px" }}>
-            <ConnectWalletButton />
-          </div>
+          <ConnectWalletButton />
         </div>
       </header>
 
       <main className="app-main">
         {!connected ? (
           <div className="connect-prompt">
-            <h2>Connect your wallet to manage your Contra instance</h2>
-            <p>Use the button above to connect your Solana wallet</p>
-            <p className="info-text">Powered by Anza Wallet Adapter</p>
+            <h2>Connect your wallet</h2>
+            <p>Manage your Contra escrow instance</p>
           </div>
         ) : (
           <div className="dashboard">
             <div className="wallet-info">
-              <h3>Connected Wallet</h3>
+              <h3>Wallet</h3>
               <p className="wallet-address">{publicKey?.toBase58()}</p>
             </div>
 
@@ -67,23 +71,37 @@ function AppContent() {
                 className={`tab ${activeTab === "escrow" ? "active" : ""}`}
                 onClick={() => setActiveTab("escrow")}
               >
-                Escrow Management
+                Escrow
+              </button>
+              <button
+                className={`tab ${activeTab === "activity" ? "active" : ""}`}
+                onClick={() => setActiveTab("activity")}
+              >
+                Activity
+                {isPolling && <span className="tab-polling-dot" />}
+              </button>
+              <button
+                className={`tab ${activeTab === "payout" ? "active" : ""}`}
+                onClick={() => setActiveTab("payout")}
+              >
+                Payout
               </button>
               <button
                 className={`tab ${activeTab === "mint" ? "active" : ""}`}
                 onClick={() => setActiveTab("mint")}
               >
-                Mint Management
+                Mint
               </button>
               <button
                 className={`tab ${activeTab === "contra" ? "active" : ""}`}
                 onClick={() => setActiveTab("contra")}
               >
-                Contra Management
+                Contra
               </button>
             </div>
 
             <div className="tab-content">
+              {/* Escrow tab */}
               <div
                 style={{ display: activeTab === "escrow" ? "block" : "none" }}
               >
@@ -91,18 +109,82 @@ function AppContent() {
 
                 {instancePubkey && (
                   <>
-                    <AdminFunctions instancePubkey={instancePubkey} />
-                    <StatusChecker instancePubkey={instancePubkey} />
-                    <OperatorFunctions instancePubkey={instancePubkey} />
-                    <UserFunctions instancePubkey={instancePubkey} />
+                    <div className="escrow-sections">
+                      <button
+                        className={`escrow-section-tab ${escrowSection === "admin" ? "active" : ""}`}
+                        onClick={() => setEscrowSection("admin")}
+                      >
+                        <span className="section-icon">&#9881;</span>
+                        Admin
+                      </button>
+                      <button
+                        className={`escrow-section-tab ${escrowSection === "operator" ? "active" : ""}`}
+                        onClick={() => setEscrowSection("operator")}
+                      >
+                        <span className="section-icon">&#9654;</span>
+                        Operator
+                      </button>
+                      <button
+                        className={`escrow-section-tab ${escrowSection === "user" ? "active" : ""}`}
+                        onClick={() => setEscrowSection("user")}
+                      >
+                        <span className="section-icon">&#8644;</span>
+                        User
+                      </button>
+                      <button
+                        className={`escrow-section-tab ${escrowSection === "status" ? "active" : ""}`}
+                        onClick={() => setEscrowSection("status")}
+                      >
+                        <span className="section-icon">&#8505;</span>
+                        Status
+                      </button>
+                    </div>
+
+                    <div className="escrow-section-content">
+                      {escrowSection === "admin" && (
+                        <AdminFunctions instancePubkey={instancePubkey} />
+                      )}
+                      {escrowSection === "status" && (
+                        <StatusChecker instancePubkey={instancePubkey} />
+                      )}
+                      {escrowSection === "operator" && (
+                        <OperatorFunctions instancePubkey={instancePubkey} />
+                      )}
+                      {escrowSection === "user" && (
+                        <UserFunctions instancePubkey={instancePubkey} />
+                      )}
+                    </div>
                   </>
                 )}
               </div>
 
+              {/* Activity tab */}
+              <div
+                style={{ display: activeTab === "activity" ? "block" : "none" }}
+              >
+                <ActivityStats
+                  stats={stats}
+                  isPolling={isPolling}
+                  onStart={start}
+                  onStop={stop}
+                  instancePubkey={instancePubkey || null}
+                />
+                <ActivityFeed transactions={transactions} mintDecimals={mintDecimals} />
+              </div>
+
+              {/* Payout tab */}
+              <div
+                style={{ display: activeTab === "payout" ? "block" : "none" }}
+              >
+                <PayoutManager />
+              </div>
+
+              {/* Mint tab */}
               <div style={{ display: activeTab === "mint" ? "block" : "none" }}>
                 <MintManager />
               </div>
 
+              {/* Contra tab */}
               <div
                 style={{ display: activeTab === "contra" ? "block" : "none" }}
               >
@@ -112,13 +194,6 @@ function AppContent() {
           </div>
         )}
       </main>
-
-      <footer className="app-footer">
-        <p>Contra Escrow & Withdraw Management Interface</p>
-        <p className="footer-note">
-          Built with Anza Wallet Adapter & @solana/kit - Modern Solana tooling!
-        </p>
-      </footer>
     </div>
   );
 }
