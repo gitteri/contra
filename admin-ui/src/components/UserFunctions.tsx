@@ -3,12 +3,14 @@ import { useSolana } from '../hooks/useSolana';
 import { useWallet } from '../hooks/useWallet';
 import { useWalletStandardAccount } from '../hooks/useWalletStandardAccount';
 import { useCluster } from '../hooks/useCluster';
+import { useLocalStorage, useRecentItems } from '../hooks/useLocalStorage';
 import { address } from '@solana/addresses';
 import { useWalletAccountTransactionSendingSigner } from '@solana/react';
 import type { UiWalletAccount } from '@wallet-standard/react';
 import { getBase58Decoder } from '@solana/codecs-strings';
 import { getDepositInstructionAsync } from '@contra-escrow';
 import { getWithdrawFundsInstructionAsync } from '@contra-withdraw';
+import { CONTRA_READ_URL } from '../utils/contraRpc';
 import { createSolanaRpc } from '@solana/rpc';
 import {
   pipe,
@@ -20,8 +22,8 @@ import {
   assertIsTransactionMessageWithSingleSendingSigner,
 } from '@solana/kit';
 
-const rawUrl = import.meta.env.VITE_CONTRA_RPC_URL || 'https://api.onlyoncontra.xyz';
-const CONTRA_RPC_URL = rawUrl.startsWith('http://') || rawUrl.startsWith('https://') ? rawUrl : `https://${rawUrl}`;
+// Contra read endpoint for blockhash, write for sendTransaction
+// (imported from utils/contraRpc)
 
 interface UserFunctionsProps {
   instancePubkey: string;
@@ -42,11 +44,16 @@ function DepositSection({
   onError: (error: string) => void;
 }) {
   const { rpc } = useSolana();
-  const [depositMintAddress, setDepositMintAddress] = useState('');
+  const [savedMint] = useLocalStorage<string>('lastMintAddress', '');
+  const [depositMintAddress, setDepositMintAddress] = useState(savedMint);
   const [depositAmount, setDepositAmount] = useState('');
   const [recipientAddress, setRecipientAddress] = useState('');
   const [depositing, setDepositing] = useState(false);
+  const [recentMints] = useRecentItems('recentMints', 5);
   const transactionSigner = useWalletAccountTransactionSendingSigner(account, chainId);
+
+  const truncateAddress = (addr: string) =>
+    addr.length > 12 ? `${addr.slice(0, 6)}...${addr.slice(-4)}` : addr;
 
   const handleDeposit = async () => {
     if (!depositMintAddress || !depositAmount) return;
@@ -115,17 +122,34 @@ function DepositSection({
       </p>
       <div className="form-group">
         <label>Mint Address</label>
-        <input
+        <input autoComplete="off" data-1p-ignore
           type="text"
           value={depositMintAddress}
           onChange={(e) => setDepositMintAddress(e.target.value)}
           placeholder="Enter token mint address"
           className="input"
         />
+        {recentMints.length > 0 && (
+          <div className="recent-items recent-items-inline">
+            <span className="recent-label">Recent mints</span>
+            <div className="recent-list">
+              {recentMints.map((addr) => (
+                <button
+                  key={addr}
+                  className="recent-item"
+                  onClick={() => setDepositMintAddress(addr)}
+                  title={addr}
+                >
+                  <span className="recent-item-text">{truncateAddress(addr)}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
       <div className="form-group">
         <label>Amount</label>
-        <input
+        <input autoComplete="off" data-1p-ignore
           type="number"
           value={depositAmount}
           onChange={(e) => setDepositAmount(e.target.value)}
@@ -135,7 +159,7 @@ function DepositSection({
       </div>
       <div className="form-group">
         <label>Recipient (optional)</label>
-        <input
+        <input autoComplete="off" data-1p-ignore
           type="text"
           value={recipientAddress}
           onChange={(e) => setRecipientAddress(e.target.value)}
@@ -166,11 +190,16 @@ function WithdrawSection({
   onSuccess: (message: string) => void;
   onError: (error: string) => void;
 }) {
-  const [withdrawMintAddress, setWithdrawMintAddress] = useState('');
+  const [savedMint] = useLocalStorage<string>('lastMintAddress', '');
+  const [withdrawMintAddress, setWithdrawMintAddress] = useState(savedMint);
   const [withdrawAmount, setWithdrawAmount] = useState('');
   const [withdrawDestination, setWithdrawDestination] = useState('');
   const [withdrawing, setWithdrawing] = useState(false);
+  const [recentMints] = useRecentItems('recentMints', 5);
   const transactionSigner = useWalletAccountTransactionSendingSigner(account, chainId);
+
+  const truncateAddress = (addr: string) =>
+    addr.length > 12 ? `${addr.slice(0, 6)}...${addr.slice(-4)}` : addr;
 
   const handleWithdraw = async () => {
     if (!withdrawMintAddress || !withdrawAmount) return;
@@ -182,8 +211,8 @@ function WithdrawSection({
       const amount = BigInt(withdrawAmount);
       const destination = withdrawDestination ? address(withdrawDestination) : null;
 
-      // Create RPC connection to Contra for the withdrawal transaction
-      const contraRpc = createSolanaRpc(CONTRA_RPC_URL);
+      // Read blockhash from Contra read endpoint
+      const contraReadRpcClient = createSolanaRpc(CONTRA_READ_URL);
 
       // Get the withdraw instruction
       const instruction = await getWithdrawFundsInstructionAsync({
@@ -196,7 +225,7 @@ function WithdrawSection({
       console.log('Created withdraw instruction:', instruction);
 
       // Get recent blockhash from Contra
-      const { value: latestBlockhash } = await contraRpc.getLatestBlockhash({ commitment: 'confirmed' }).send();
+      const { value: latestBlockhash } = await contraReadRpcClient.getLatestBlockhash({ commitment: 'confirmed' }).send();
 
       // Build transaction message
       const transactionMessage = pipe(
@@ -240,17 +269,34 @@ function WithdrawSection({
       </p>
       <div className="form-group">
         <label>Mint Address</label>
-        <input
+        <input autoComplete="off" data-1p-ignore
           type="text"
           value={withdrawMintAddress}
           onChange={(e) => setWithdrawMintAddress(e.target.value)}
           placeholder="Enter token mint address"
           className="input"
         />
+        {recentMints.length > 0 && (
+          <div className="recent-items recent-items-inline">
+            <span className="recent-label">Recent mints</span>
+            <div className="recent-list">
+              {recentMints.map((addr) => (
+                <button
+                  key={addr}
+                  className="recent-item"
+                  onClick={() => setWithdrawMintAddress(addr)}
+                  title={addr}
+                >
+                  <span className="recent-item-text">{truncateAddress(addr)}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
       <div className="form-group">
         <label>Amount</label>
-        <input
+        <input autoComplete="off" data-1p-ignore
           type="number"
           value={withdrawAmount}
           onChange={(e) => setWithdrawAmount(e.target.value)}
@@ -260,7 +306,7 @@ function WithdrawSection({
       </div>
       <div className="form-group">
         <label>Destination (optional)</label>
-        <input
+        <input autoComplete="off" data-1p-ignore
           type="text"
           value={withdrawDestination}
           onChange={(e) => setWithdrawDestination(e.target.value)}
@@ -306,13 +352,9 @@ export function UserFunctions({ instancePubkey }: UserFunctionsProps) {
       {error && <div className="error-message">{error}</div>}
 
       {success && (
-        <div style={{ marginTop: '1rem', padding: '1rem', backgroundColor: 'rgba(76, 175, 80, 0.2)', borderRadius: '8px' }}>
-          <p style={{ margin: 0, color: '#4caf50', fontWeight: 'bold', marginBottom: '0.5rem' }}>
-            {success.split('!')[0]}!
-          </p>
-          <p style={{ margin: 0, fontSize: '0.85rem', wordBreak: 'break-all' }}>
-            Signature: {success.split('Signature: ')[1]}
-          </p>
+        <div className="alert alert-success">
+          <span className="alert-title">{success.split('!')[0]}!</span>
+          <span className="alert-body">Signature: {success.split('Signature: ')[1]}</span>
         </div>
       )}
 

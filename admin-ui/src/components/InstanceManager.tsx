@@ -1,7 +1,8 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useSolana } from '../hooks/useSolana';
 import { useWalletStandardAccount } from '../hooks/useWalletStandardAccount';
 import { useCluster } from '../hooks/useCluster';
+import { useLocalStorage, useRecentItems } from '../hooks/useLocalStorage';
 import { address } from '@solana/addresses';
 import type { Address } from '@solana/addresses';
 import { decodeInstance, getCreateInstanceInstructionAsync } from '@contra-escrow';
@@ -110,15 +111,25 @@ export function InstanceManager({ onInstanceSelect }: InstanceManagerProps) {
   const { rpc } = useSolana();
   const account = useWalletStandardAccount();
   const { network } = useCluster();
-  const [instanceAddress, setInstanceAddress] = useState('');
+  const [savedAddress, setSavedAddress] = useLocalStorage<string>('instanceAddress', '');
+  const [instanceAddress, setInstanceAddress] = useState(savedAddress);
   const [instanceData, setInstanceData] = useState<InstanceData | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [createSuccess, setCreateSuccess] = useState<string | null>(null);
+  const [recentInstances, addRecentInstance, removeRecentInstance] = useRecentItems('recentInstances', 8);
 
   const chainId = (network === 'localnet' ? 'solana:devnet' : `solana:${network}`) as `solana:${string}`;
 
   const walletAddress = account?.address;
+
+  // Auto-load saved instance on mount
+  useEffect(() => {
+    if (savedAddress && !instanceData) {
+      fetchInstanceData(savedAddress);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const fetchInstanceData = async (instancePubkey: string) => {
     try {
@@ -172,6 +183,10 @@ export function InstanceManager({ onInstanceSelect }: InstanceManagerProps) {
 
       setInstanceData(instance);
       onInstanceSelect(instancePubkey);
+
+      // Persist to localStorage
+      setSavedAddress(instancePubkey);
+      addRecentInstance(instancePubkey);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to fetch instance');
       console.error('Error fetching instance:', err);
@@ -192,6 +207,14 @@ export function InstanceManager({ onInstanceSelect }: InstanceManagerProps) {
     setCreateSuccess(null);
   };
 
+  const handleLoadRecent = (addr: string) => {
+    setInstanceAddress(addr);
+    fetchInstanceData(addr);
+  };
+
+  const truncateAddress = (addr: string) =>
+    addr.length > 12 ? `${addr.slice(0, 6)}...${addr.slice(-4)}` : addr;
+
   return (
     <div className="card">
       <h2>Instance Manager</h2>
@@ -199,7 +222,7 @@ export function InstanceManager({ onInstanceSelect }: InstanceManagerProps) {
       <div className="form-group">
         <label>Instance Address</label>
         <div className="input-group">
-          <input
+          <input autoComplete="off" data-1p-ignore
             type="text"
             value={instanceAddress}
             onChange={(e) => setInstanceAddress(e.target.value)}
@@ -215,6 +238,34 @@ export function InstanceManager({ onInstanceSelect }: InstanceManagerProps) {
           </button>
         </div>
       </div>
+
+      {recentInstances.length > 0 && (
+        <div className="recent-items">
+          <span className="recent-label">Recent</span>
+          <div className="recent-list">
+            {recentInstances.map((addr) => (
+              <button
+                key={addr}
+                className={`recent-item ${instanceData?.pubkey === addr ? 'active' : ''}`}
+                onClick={() => handleLoadRecent(addr)}
+                title={addr}
+              >
+                <span className="recent-item-text">{truncateAddress(addr)}</span>
+                <span
+                  className="recent-item-remove"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    removeRecentInstance(addr);
+                  }}
+                  title="Remove"
+                >
+                  &times;
+                </span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
 
       <div className="form-group">
         {account && walletAddress ? (
@@ -237,19 +288,13 @@ export function InstanceManager({ onInstanceSelect }: InstanceManagerProps) {
       {error && <div className="error-message">{error}</div>}
 
       {createSuccess && (
-        <div style={{ marginTop: '1rem', padding: '1rem', backgroundColor: 'rgba(76, 175, 80, 0.2)', borderRadius: '8px' }}>
-          <p style={{ margin: 0, color: '#4caf50', fontWeight: 'bold', marginBottom: '0.5rem' }}>
-            {createSuccess.split('!')[0]}!
-          </p>
+        <div className="alert alert-success">
+          <span className="alert-title">{createSuccess.split('!')[0]}!</span>
           {createSuccess.includes('Address:') && (
-            <p style={{ margin: 0, fontSize: '0.85rem', wordBreak: 'break-all' }}>
-              {createSuccess.split('Address: ')[1]}
-            </p>
+            <span className="alert-body">{createSuccess.split('Address: ')[1]}</span>
           )}
           {createSuccess.includes('Check status:') && (
-            <p style={{ margin: 0, fontSize: '0.85rem', wordBreak: 'break-all' }}>
-              Signature: {createSuccess.split('Check status: ')[1]}
-            </p>
+            <span className="alert-body">Signature: {createSuccess.split('Check status: ')[1]}</span>
           )}
         </div>
       )}
