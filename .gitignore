@@ -12,9 +12,14 @@
 **/escrow-generated/
 **/withdraw-generated/
 
+# Un-ignore TypeScript generated clients (needed for admin-ui Docker build)
+!contra-escrow-program/clients/typescript/src/generated/
+!contra-withdraw-program/clients/typescript/src/generated/
+
 # Javascript / Typescript
 **/node_modules/
 **/dist/
+.pnpm-store/
 
 # AI
 .claude/
