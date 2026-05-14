@@ -95,6 +95,18 @@ fn build_precompiles() -> HashMap<Pubkey, AccountSharedData> {
         AccountSharedData::from(withdraw_account),
     );
 
+    // DvP Swap program.
+    let swap_elf = include_bytes!("../../precompiles/dvp_swap_program.so");
+    let (_, swap_account) = bpf_loader_program_account(
+        &dvp_swap_program_client::DVP_SWAP_PROGRAM_ID,
+        swap_elf,
+        &rent,
+    );
+    precompiles.insert(
+        dvp_swap_program_client::DVP_SWAP_PROGRAM_ID,
+        AccountSharedData::from(swap_account),
+    );
+
     precompiles
 }
 
@@ -113,7 +125,8 @@ mod tests {
         assert!(PRECOMPILES.contains_key(
             &private_channel_withdraw_program_client::PRIVATE_CHANNEL_WITHDRAW_PROGRAM_ID
         ));
-        assert_eq!(PRECOMPILES.len(), 6);
+        assert!(PRECOMPILES.contains_key(&dvp_swap_program_client::DVP_SWAP_PROGRAM_ID));
+        assert_eq!(PRECOMPILES.len(), 7);
     }
 
     #[test]
@@ -123,6 +136,7 @@ mod tests {
             spl_associated_token_account::ID,
             spl_memo::id(),
             private_channel_withdraw_program_client::PRIVATE_CHANNEL_WITHDRAW_PROGRAM_ID,
+            dvp_swap_program_client::DVP_SWAP_PROGRAM_ID,
         ] {
             let account = PRECOMPILES.get(&program_id).expect("missing precompile");
             assert!(account.executable(), "{} should be executable", program_id);
