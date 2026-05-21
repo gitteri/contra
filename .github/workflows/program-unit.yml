@@ -2,17 +2,19 @@ name: Program Unit Tests
 
 on:
   push:
-    branches: [main]
+    branches: [main, hardening/pre-release-audit]
     paths:
-      - "contra-escrow-program/**"
-      - "contra-withdraw-program/**"
+      - "private-channel-escrow-program/**"
+      - "private-channel-withdraw-program/**"
+      - "dvp-swap-program/**"
       - "Cargo.*"
       - ".github/workflows/program-unit.yml"
   pull_request:
-    branches: [main]
+    branches: [main, hardening/pre-release-audit]
     paths:
-      - "contra-escrow-program/**"
-      - "contra-withdraw-program/**"
+      - "private-channel-escrow-program/**"
+      - "private-channel-withdraw-program/**"
+      - "dvp-swap-program/**"
       - "Cargo.*"
       - ".github/workflows/program-unit.yml"
 
@@ -22,12 +24,14 @@ env:
 
 permissions:
   contents: read
+  pull-requests: write
+  actions: read
 
 jobs:
   unit-test:
     name: Unit Tests with Coverage
-    runs-on: contra-runner-1
-    timeout-minutes: 15
+    runs-on: private-channel-runner-1
+    timeout-minutes: 40
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
@@ -35,7 +39,6 @@ jobs:
       - name: Setup environment
         uses: ./.github/actions/setup-environment
         with:
-          rust-toolchain: stable
           rust-components: llvm-tools-preview
 
       - name: Run unit tests with coverage
@@ -57,11 +60,41 @@ jobs:
         with:
           name: unit-coverage-reports
           path: |
-            contra-escrow-program/coverage-*.lcov
-            contra-escrow-program/coverage-html-*/
-            contra-withdraw-program/coverage-*.lcov
-            contra-withdraw-program/coverage-html-*/
+            coverage/coverage-escrow-unit.lcov
+            coverage/coverage-escrow-html/
+            coverage/coverage-withdraw-unit.lcov
+            coverage/coverage-withdraw-html/
+            coverage/coverage-dvp-swap-unit.lcov
+            coverage/coverage-dvp-swap-html/
+          if-no-files-found: warn
           retention-days: 30
+
+      - name: Update PR coverage — Escrow Program
+        if: github.event_name == 'pull_request'
+        uses: ./.github/actions/update-coverage-row
+        with:
+          component: Escrow Program
+          lcov-file: coverage/coverage-escrow-unit.lcov
+          artifact-name: unit-coverage-reports
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update PR coverage — Withdraw Program
+        if: github.event_name == 'pull_request'
+        uses: ./.github/actions/update-coverage-row
+        with:
+          component: Withdraw Program
+          lcov-file: coverage/coverage-withdraw-unit.lcov
+          artifact-name: unit-coverage-reports
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update PR coverage — DvP Swap Program
+        if: github.event_name == 'pull_request'
+        uses: ./.github/actions/update-coverage-row
+        with:
+          component: DvP Swap Program
+          lcov-file: coverage/coverage-dvp-swap-unit.lcov
+          artifact-name: unit-coverage-reports
+          github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Show failure logs
         if: failure()

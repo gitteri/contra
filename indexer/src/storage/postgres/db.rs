@@ -3,7 +3,9 @@ use tracing::info;
 
 use crate::{
     error::StorageError,
-    storage::common::models::{DbMint, DbTransaction, TransactionStatus, TransactionType},
+    storage::common::models::{
+        DbMint, DbTransaction, MintDbBalance, TransactionStatus, TransactionType,
+    },
     PostgresConfig,
 };
 
@@ -23,6 +25,9 @@ mod transaction_cols {
     pub const UPDATED_AT: &str = "updated_at";
     pub const PROCESSED_AT: &str = "processed_at";
     pub const COUNTERPART_SIGNATURE: &str = "counterpart_signature";
+    pub const TRACE_ID: &str = "trace_id";
+    pub const REMINT_SIGNATURES: &str = "remint_signatures";
+    pub const PENDING_REMINT_DEADLINE_AT: &str = "pending_remint_deadline_at";
 }
 
 #[derive(Clone)]
@@ -40,21 +45,12 @@ impl PostgresDb {
         Ok(Self { pool })
     }
 
-    pub async fn commit_transaction(
-        &self,
-        tx: sqlx::Transaction<'_, sqlx::Postgres>,
-    ) -> Result<(), sqlx::Error> {
-        tx.commit().await
-    }
-
-    pub async fn rollback_transaction(
-        &self,
-        tx: sqlx::Transaction<'_, sqlx::Postgres>,
-    ) -> Result<(), sqlx::Error> {
-        tx.rollback().await
-    }
-
     pub async fn init_schema(&self) -> Result<(), sqlx::Error> {
+        // Ensure pgcrypto is available for gen_random_uuid()
+        sqlx::query(r#"CREATE EXTENSION IF NOT EXISTS "pgcrypto""#)
+            .execute(&self.pool)
+            .await?;
+
         // Create enum type for transaction status
         sqlx::query(
             r#"
@@ -100,7 +96,8 @@ impl PostgresDb {
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 processed_at TIMESTAMPTZ,
-                counterpart_signature TEXT
+                counterpart_signature TEXT,
+                trace_id TEXT NOT NULL DEFAULT gen_random_uuid()::text
             );
             "#,
         )
@@ -137,6 +134,59 @@ impl PostgresDb {
         // Add unique index for signatures and counterpart_signature
         sqlx::query(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_transactions_signature ON transactions (signature)",
+        )
+        .execute(&self.pool)
+        .await?;
+
+        // Idempotent migration: add trace_id to existing databases
+        info!("Running trace_id migration if needed...");
+        sqlx::query(
+            r#"
+            DO $$ BEGIN
+                ALTER TABLE transactions ADD COLUMN IF NOT EXISTS trace_id TEXT;
+                UPDATE transactions SET trace_id = gen_random_uuid()::text WHERE trace_id IS NULL;
+                IF EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'transactions' AND column_name = 'trace_id' AND is_nullable = 'YES'
+                ) THEN
+                    ALTER TABLE transactions ALTER COLUMN trace_id SET NOT NULL;
+                END IF;
+            END $$;
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+        info!("trace_id migration complete");
+
+        // Idempotent migration: add remint_signatures to existing databases
+        info!("Running remint_signatures migration if needed...");
+        sqlx::query(
+            r#"
+            DO $$ BEGIN                                                                         
+                ALTER TABLE transactions ADD COLUMN IF NOT EXISTS remint_signatures TEXT[];     
+            END $$;
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+        info!("remint_signatures migration complete");
+
+        // Idempotent migration: add pending_remint_deadline_at to existing databases
+        info!("Running pending_remint_deadline_at migration if needed...");
+        sqlx::query(
+            r#"
+            DO $$ BEGIN                                                                         
+                ALTER TABLE transactions ADD COLUMN IF NOT EXISTS pending_remint_deadline_at    
+        TIMESTAMPTZ;                                                                            
+            END $$;                                                                             
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+        info!("pending_remint_deadline_at migration complete");
+
+        sqlx::query(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_transactions_trace_id ON transactions (trace_id)",
         )
         .execute(&self.pool)
         .await?;
@@ -277,7 +327,82 @@ impl PostgresDb {
         .execute(&self.pool)
         .await?;
 
+        // Idempotent migration: add is_pausable to existing databases.
+        // Nullable = "unknown"; populated lazily by the operator after an RPC
+        // check against the on-chain mint's Token-2022 PausableConfig extension.
+        sqlx::query("ALTER TABLE mints ADD COLUMN IF NOT EXISTS is_pausable BOOLEAN")
+            .execute(&self.pool)
+            .await?;
+
+        // Same pattern for the PermanentDelegate extension — resolved lazily
+        // the first time the operator touches the mint. Gate for the balance
+        // pre-flight that guards against permanent-delegate drains.
+        sqlx::query("ALTER TABLE mints ADD COLUMN IF NOT EXISTS has_permanent_delegate BOOLEAN")
+            .execute(&self.pool)
+            .await?;
+
+        // Add failed_reminted status for withdrawal remint recovery
+        sqlx::query(
+            r#"
+            ALTER TYPE transaction_status ADD VALUE IF NOT EXISTS 'failed_reminted';
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        // Add manual_review status for unconfirmed remints requiring investigation
+        sqlx::query(
+            r#"
+            ALTER TYPE transaction_status ADD VALUE IF NOT EXISTS 'manual_review';
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        // Add pending_remint status for withdrawals that failed and have to be processed for remint
+        sqlx::query(
+            r#"
+            ALTER TYPE transaction_status ADD VALUE IF NOT EXISTS 'pending_remint';
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
         info!("Database schema initialized");
+        Ok(())
+    }
+
+    pub async fn drop_tables(&self) -> Result<(), sqlx::Error> {
+        info!("Dropping database tables...");
+
+        // Drop tables with CASCADE to handle dependencies
+        sqlx::query("DROP TABLE IF EXISTS transactions CASCADE")
+            .execute(&self.pool)
+            .await?;
+
+        sqlx::query("DROP TABLE IF EXISTS indexer_state CASCADE")
+            .execute(&self.pool)
+            .await?;
+
+        sqlx::query("DROP TABLE IF EXISTS mints CASCADE")
+            .execute(&self.pool)
+            .await?;
+
+        // Drop sequences
+        sqlx::query("DROP SEQUENCE IF EXISTS withdrawal_nonce_seq CASCADE")
+            .execute(&self.pool)
+            .await?;
+
+        // Drop enum types
+        sqlx::query("DROP TYPE IF EXISTS transaction_status CASCADE")
+            .execute(&self.pool)
+            .await?;
+
+        sqlx::query("DROP TYPE IF EXISTS transaction_type CASCADE")
+            .execute(&self.pool)
+            .await?;
+
+        info!("Database tables dropped successfully");
         Ok(())
     }
 
@@ -301,8 +426,8 @@ impl PostgresDb {
         let result: Option<(i64,)> = sqlx::query_as(&format!(
             r#"
             INSERT INTO transactions (
-                {}, {}, {}, {}, {}, {}, {}, {}, {}
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                {}, {}, {}, {}, {}, {}, {}, {}, {}, {}
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             ON CONFLICT ({}) DO NOTHING
             RETURNING {}
             "#,
@@ -315,6 +440,7 @@ impl PostgresDb {
             transaction_cols::MEMO,
             transaction_cols::TRANSACTION_TYPE,
             transaction_cols::STATUS,
+            transaction_cols::TRACE_ID,
             transaction_cols::SIGNATURE,
             transaction_cols::ID,
         ))
@@ -327,6 +453,7 @@ impl PostgresDb {
         .bind(&transaction.memo)
         .bind(transaction.transaction_type)
         .bind(transaction.status)
+        .bind(&transaction.trace_id)
         .fetch_optional(&self.pool)
         .await?;
 
@@ -380,8 +507,8 @@ impl PostgresDb {
             let result: Option<(i64,)> = sqlx::query_as(&format!(
                 r#"
                 INSERT INTO transactions (
-                    {}, {}, {}, {}, {}, {}, {}, {}, {}
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                    {}, {}, {}, {}, {}, {}, {}, {}, {}, {}
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                 ON CONFLICT ({}) DO NOTHING
                 RETURNING {}
                 "#,
@@ -394,6 +521,7 @@ impl PostgresDb {
                 transaction_cols::MEMO,
                 transaction_cols::TRANSACTION_TYPE,
                 transaction_cols::STATUS,
+                transaction_cols::TRACE_ID,
                 transaction_cols::SIGNATURE,
                 transaction_cols::ID,
             ))
@@ -406,6 +534,7 @@ impl PostgresDb {
             .bind(&transaction.memo)
             .bind(transaction.transaction_type)
             .bind(transaction.status)
+            .bind(&transaction.trace_id)
             .fetch_optional(&mut *tx)
             .await?;
 
@@ -438,7 +567,7 @@ impl PostgresDb {
             r#"
             SELECT
                 {}, {}, {}, {}, {}, {}, {}, {}, {}, {},
-                {}, {}, {}, {}, {}
+                {}, {}, {}, {}, {}, {}, {}, {}
             FROM transactions
             WHERE {} = $1 AND {} = $2
             ORDER BY {} ASC
@@ -446,6 +575,7 @@ impl PostgresDb {
             "#,
             transaction_cols::ID,
             transaction_cols::SIGNATURE,
+            transaction_cols::TRACE_ID,
             transaction_cols::SLOT,
             transaction_cols::INITIATOR,
             transaction_cols::RECIPIENT,
@@ -459,6 +589,8 @@ impl PostgresDb {
             transaction_cols::UPDATED_AT,
             transaction_cols::PROCESSED_AT,
             transaction_cols::COUNTERPART_SIGNATURE,
+            transaction_cols::REMINT_SIGNATURES,
+            transaction_cols::PENDING_REMINT_DEADLINE_AT,
             // Filters
             transaction_cols::STATUS,
             transaction_cols::TRANSACTION_TYPE,
@@ -468,6 +600,50 @@ impl PostgresDb {
         .bind(TransactionStatus::Pending)
         .bind(transaction_type)
         .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+    }
+
+    /// Returns all withdrawal transactions currently in PendingRemint status.
+    /// Called on startup to re-hydrate the in-memory remint queue after a crash.
+    pub async fn get_pending_remint_transactions_internal(
+        &self,
+    ) -> Result<Vec<DbTransaction>, sqlx::Error> {
+        sqlx::query_as::<_, DbTransaction>(&format!(
+            r#"
+            SELECT
+                {}, {}, {}, {}, {}, {}, {}, {}, {}, {},
+                {}, {}, {}, {}, {}, {}, {}, {}
+            FROM transactions
+            WHERE {} = $1 AND {} = $2
+            ORDER BY {} ASC
+            "#,
+            transaction_cols::ID,
+            transaction_cols::SIGNATURE,
+            transaction_cols::TRACE_ID,
+            transaction_cols::SLOT,
+            transaction_cols::INITIATOR,
+            transaction_cols::RECIPIENT,
+            transaction_cols::MINT,
+            transaction_cols::AMOUNT,
+            transaction_cols::MEMO,
+            transaction_cols::TRANSACTION_TYPE,
+            transaction_cols::WITHDRAWAL_NONCE,
+            transaction_cols::STATUS,
+            transaction_cols::CREATED_AT,
+            transaction_cols::UPDATED_AT,
+            transaction_cols::PROCESSED_AT,
+            transaction_cols::COUNTERPART_SIGNATURE,
+            transaction_cols::REMINT_SIGNATURES,
+            transaction_cols::PENDING_REMINT_DEADLINE_AT,
+            // Filters
+            transaction_cols::STATUS,
+            transaction_cols::TRANSACTION_TYPE,
+            // Ordering (FIFO)
+            transaction_cols::ID,
+        ))
+        .bind(TransactionStatus::PendingRemint)
+        .bind(TransactionType::Withdrawal)
         .fetch_all(&self.pool)
         .await
     }
@@ -482,7 +658,7 @@ impl PostgresDb {
             r#"
             SELECT
                 {}, {}, {}, {}, {}, {}, {}, {}, {},
-                {}, {}, {}, {}, {}, {}
+                {}, {}, {}, {}, {}, {}, {}, {}, {}
             FROM transactions
             WHERE {} = $1
             ORDER BY {} DESC
@@ -490,6 +666,7 @@ impl PostgresDb {
             "#,
             transaction_cols::ID,
             transaction_cols::SIGNATURE,
+            transaction_cols::TRACE_ID,
             transaction_cols::SLOT,
             transaction_cols::INITIATOR,
             transaction_cols::RECIPIENT,
@@ -503,6 +680,8 @@ impl PostgresDb {
             transaction_cols::UPDATED_AT,
             transaction_cols::PROCESSED_AT,
             transaction_cols::COUNTERPART_SIGNATURE,
+            transaction_cols::REMINT_SIGNATURES,
+            transaction_cols::PENDING_REMINT_DEADLINE_AT,
             // Filter
             transaction_cols::TRANSACTION_TYPE,
             // Ordering
@@ -532,13 +711,15 @@ impl PostgresDb {
         program_type: &str,
         slot: u64,
     ) -> Result<(), sqlx::Error> {
+        // Monotonic guard: GREATEST() prevents a lower slot (e.g. backfill
+        // replay after a flushed Yellowstone update) from regressing the cursor.
         sqlx::query(
             r#"
             INSERT INTO indexer_state (program_type, last_committed_slot, updated_at)
             VALUES ($1, $2, NOW())
             ON CONFLICT (program_type)
             DO UPDATE SET
-                last_committed_slot = EXCLUDED.last_committed_slot,
+                last_committed_slot = GREATEST(indexer_state.last_committed_slot, EXCLUDED.last_committed_slot),
                 updated_at = NOW()
             "#,
         )
@@ -563,7 +744,7 @@ impl PostgresDb {
             r#"
             SELECT
                 {}, {}, {}, {}, {}, {}, {}, {}, {}, {},
-                {}, {}, {}, {}, {}
+                {}, {}, {}, {}, {}, {}, {}, {}
             FROM transactions
             WHERE {} = $1 AND {} = $2
             ORDER BY {} ASC
@@ -572,6 +753,7 @@ impl PostgresDb {
             "#,
             transaction_cols::ID,
             transaction_cols::SIGNATURE,
+            transaction_cols::TRACE_ID,
             transaction_cols::SLOT,
             transaction_cols::INITIATOR,
             transaction_cols::RECIPIENT,
@@ -585,6 +767,8 @@ impl PostgresDb {
             transaction_cols::UPDATED_AT,
             transaction_cols::PROCESSED_AT,
             transaction_cols::COUNTERPART_SIGNATURE,
+            transaction_cols::REMINT_SIGNATURES,
+            transaction_cols::PENDING_REMINT_DEADLINE_AT,
             // Filters
             transaction_cols::STATUS,
             transaction_cols::TRANSACTION_TYPE,
@@ -645,6 +829,83 @@ impl PostgresDb {
         Ok(())
     }
 
+    /// Transitions a withdrawal to PendingRemint status, storing the
+    /// withdrawal signatures needed for the finality check on restart.
+    pub async fn set_pending_remint_internal(
+        &self,
+        transaction_id: i64,
+        remint_signatures: Vec<String>,
+        deadline_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), sqlx::Error> {
+        let result = sqlx::query(
+            r#"
+            UPDATE transactions
+            SET
+                status = $2,
+                remint_signatures = $3,
+                pending_remint_deadline_at = $4,
+                updated_at = NOW()
+            WHERE id = $1
+                AND status = 'processing'
+            "#,
+        )
+        .bind(transaction_id)
+        .bind(TransactionStatus::PendingRemint)
+        .bind(remint_signatures)
+        .bind(deadline_at)
+        .execute(&self.pool)
+        .await?;
+
+        if result.rows_affected() == 0 {
+            return Err(sqlx::Error::RowNotFound);
+        }
+
+        Ok(())
+    }
+
+    /// Flip every `Pending`/`Processing` withdrawal to `ManualReview`.
+    ///
+    /// `exclude_id` is the poison row that the caller has already quarantined
+    /// via the async `storage_tx` writer. That update may not have hit the DB
+    /// yet when this sweep runs, so the row's status is still
+    /// `Pending`/`Processing` here; excluding it prevents a second
+    /// `ManualReview` webhook for the same transaction.
+    ///
+    /// Terminal rows are left untouched so the webhook does not re-alert on
+    /// already-handled transactions. Returns the number of rows affected.
+    ///
+    /// Scope is intentionally DB-wide over `transaction_type = 'withdrawal'`
+    /// to match the fetcher's own scope. The data model assumes a single
+    /// withdrawal operator per database; multi-instance isolation would
+    /// require an `instance_pda` column on `transactions` that does not exist
+    /// today.
+    // Coverage-ignore rationale (category b, defensive recovery):
+    //   `quarantine_all_active_withdrawals_internal` is only invoked by
+    //   the poison-pill pipeline in `operator/processor.rs`
+    //   (`halt_withdrawal_pipeline`), which is itself LCOV-excluded —
+    //   integration tests do not produce malformed rows that would trip
+    //   it. The SQL itself is trivial; the behavior is covered via the
+    //   `Storage::Mock` variant in in-crate tests.
+    pub async fn quarantine_all_active_withdrawals_internal(
+        &self,
+        exclude_id: Option<i64>,
+    ) -> Result<u64, sqlx::Error> {
+        let result = sqlx::query(
+            r#"
+            UPDATE transactions
+            SET status = 'manual_review', updated_at = NOW()
+            WHERE transaction_type = 'withdrawal'
+              AND status IN ('pending', 'processing')
+              AND ($1::BIGINT IS NULL OR id <> $1)
+            "#,
+        )
+        .bind(exclude_id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected())
+    }
+
     pub async fn upsert_mints_batch_internal(&self, mints: &[DbMint]) -> Result<(), StorageError> {
         if mints.is_empty() {
             return Ok(());
@@ -674,20 +935,117 @@ impl PostgresDb {
         Ok(())
     }
 
+    /// Write-back from the operator's MintCache after it resolves whether
+    /// the on-chain mint carries the Token-2022 PausableConfig and
+    /// PermanentDelegate extensions. Both flags are always resolved in the
+    /// same RPC fetch, so they're persisted together in a single update.
+    /// Errors if the row doesn't exist — the indexer always lands the
+    /// `mints` row before any withdrawal for that mint can reach the
+    /// operator, so a missing row indicates an ordering bug.
+    pub async fn set_mint_extension_flags_internal(
+        &self,
+        mint_address: &str,
+        is_pausable: bool,
+        has_permanent_delegate: bool,
+    ) -> Result<(), StorageError> {
+        let result = sqlx::query(
+            "UPDATE mints SET is_pausable = $2, has_permanent_delegate = $3 WHERE mint_address = $1",
+        )
+        .bind(mint_address)
+        .bind(is_pausable)
+        .bind(has_permanent_delegate)
+        .execute(&self.pool)
+        .await?;
+
+        if result.rows_affected() == 0 {
+            return Err(StorageError::DatabaseError {
+                message: format!("set_mint_extension_flags: no mints row for {mint_address}"),
+            });
+        }
+
+        Ok(())
+    }
+
     pub async fn get_mint_internal(
         &self,
         mint_address: &str,
     ) -> Result<Option<DbMint>, StorageError> {
-        let mint = sqlx::query_as::<_, DbMint>(
+        Ok(
+            sqlx::query_as::<_, DbMint>("SELECT * FROM mints WHERE mint_address = $1")
+                .bind(mint_address)
+                .fetch_optional(&self.pool)
+                .await?,
+        )
+    }
+
+    /// Return per-mint aggregate balances for startup reconciliation.
+    ///
+    /// For each mint known to the DB, sums:
+    /// - `total_deposits`  : ALL indexed deposits (any status), because a deposit increases
+    ///   the escrow ATA balance on-chain the moment it is observed — the operator's private_channel minting
+    ///   status (`pending`/`processing`/`completed`/`failed`) does not change what is on-chain.
+    /// - `total_withdrawals`: only `completed` withdrawals, because only a completed
+    ///   `release_funds` call actually moves tokens out of the ATA.
+    ///
+    /// Mints with no transactions still appear (with totals = 0) because of the LEFT JOIN.
+    pub async fn get_mint_balances_for_reconciliation_internal(
+        &self,
+    ) -> Result<Vec<MintDbBalance>, sqlx::Error> {
+        sqlx::query_as::<_, MintDbBalance>(
             r#"
-            SELECT * FROM mints WHERE mint_address = $1
+            SELECT
+                m.mint_address,
+                m.token_program,
+                COALESCE(
+                    SUM(CASE WHEN t.transaction_type = 'deposit' THEN t.amount ELSE 0 END),
+                    0
+                )::BIGINT AS total_deposits,
+                COALESCE(
+                    SUM(CASE WHEN t.transaction_type = 'withdrawal' AND t.status = 'completed' THEN t.amount ELSE 0 END),
+                    0
+                )::BIGINT AS total_withdrawals
+            FROM mints m
+            LEFT JOIN transactions t ON t.mint = m.mint_address
+            GROUP BY m.mint_address, m.token_program
             "#,
         )
-        .bind(mint_address)
-        .fetch_optional(&self.pool)
-        .await?;
+        .fetch_all(&self.pool)
+        .await
+    }
 
-        Ok(mint)
+    /// Query escrow balances by mint for continuous reconciliation checks.
+    /// Only counts **completed** transactions for both deposits and withdrawals.
+    /// This provides a conservative view based on finalized database state,
+    /// suitable for comparing against on-chain escrow ATA balances.
+    ///
+    /// Returns per-mint aggregate balances where:
+    /// - `total_deposits`: sum of completed deposit amounts
+    /// - `total_withdrawals`: sum of completed withdrawal amounts
+    ///
+    /// Expected net on-chain balance = total_deposits - total_withdrawals
+    pub async fn get_escrow_balances_by_mint_internal(
+        &self,
+    ) -> Result<Vec<MintDbBalance>, sqlx::Error> {
+        sqlx::query_as::<_, MintDbBalance>(
+            r#"
+            SELECT
+                m.mint_address,
+                m.token_program,
+                COALESCE(
+                    SUM(CASE WHEN t.transaction_type = 'deposit' AND t.status = 'completed' THEN t.amount ELSE 0 END),
+                    0
+                )::BIGINT AS total_deposits,
+                COALESCE(
+                    SUM(CASE WHEN t.transaction_type = 'withdrawal' AND t.status = 'completed' THEN t.amount ELSE 0 END),
+                    0
+                )::BIGINT AS total_withdrawals
+            FROM mints m
+            LEFT JOIN transactions t ON t.mint = m.mint_address
+            GROUP BY m.mint_address, m.token_program
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await
     }
 
     pub async fn close(&self) -> Result<(), sqlx::Error> {
@@ -695,6 +1053,23 @@ impl PostgresDb {
         self.pool.close().await;
         info!("Database connection pool closed");
         Ok(())
+    }
+
+    pub async fn count_pending_transactions_internal(
+        &self,
+        transaction_type: TransactionType,
+    ) -> Result<i64, sqlx::Error> {
+        let (count,): (i64,) = sqlx::query_as(&format!(
+            "SELECT COUNT(*) FROM transactions WHERE {} = $1 AND {} = $2",
+            transaction_cols::STATUS,
+            transaction_cols::TRANSACTION_TYPE,
+        ))
+        .bind(TransactionStatus::Pending)
+        .bind(transaction_type)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(count)
     }
 
     pub async fn get_completed_withdrawal_nonces_internal(

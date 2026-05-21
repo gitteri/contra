@@ -42,7 +42,8 @@ impl RpcPoller {
                         "encoding": self.encoding.to_string(),
                         "transactionDetails": "full",
                         "maxSupportedTransactionVersion": 0,
-                        "rewards": false
+                        "rewards": false,
+                        "commitment": self.commitment.to_string(),
                     }
                 ]
             }))
@@ -120,20 +121,20 @@ impl RpcPoller {
             })
     }
 
-    /// Get slot range to process
+    /// Get slot range to process, returning (slots, chain_tip)
     pub async fn get_slots_to_process(
         &self,
         from_slot: u64,
         max_slots: usize,
-    ) -> Result<Vec<u64>, DataSourceRpcError> {
+    ) -> Result<(Vec<u64>, u64), DataSourceRpcError> {
         let latest_slot = self.get_latest_slot().await?;
 
         if from_slot >= latest_slot {
-            return Ok(vec![]);
+            return Ok((vec![], latest_slot));
         }
 
         let to_slot = std::cmp::min(from_slot + max_slots as u64, latest_slot);
-        Ok((from_slot..to_slot).collect())
+        Ok(((from_slot..to_slot).collect(), latest_slot))
     }
 }
 
@@ -226,6 +227,39 @@ mod tests {
         assert!(result.unwrap_err().to_string().contains("RPC error"));
     }
 
+    /// Regression: `get_block` must forward the configured commitment in the
+    /// request body. A previous version omitted the field, so the server
+    /// defaulted to `finalized` regardless of `RpcPoller::new`'s argument —
+    /// causing `solana-test-validator` to reply `-32009` for slots that were
+    /// only confirmed.
+    #[tokio::test]
+    async fn test_get_block_forwards_configured_commitment() {
+        let mut server = Server::new_async().await;
+        let m = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::PartialJson(json!({
+                "method": "getBlock",
+                "params": [
+                    101,
+                    { "commitment": "confirmed" }
+                ]
+            })))
+            .with_status(200)
+            .with_body(r#"{"jsonrpc":"2.0","result":null,"id":1}"#)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let poller = RpcPoller::new(
+            server.url(),
+            UiTransactionEncoding::Json,
+            CommitmentLevel::Confirmed,
+        );
+        let _ = poller.get_block(101).await;
+
+        m.assert_async().await;
+    }
+
     // ============================================================================
     // get_latest_slot Tests
     // ============================================================================
@@ -279,10 +313,11 @@ mod tests {
         let result = poller.get_slots_to_process(100, 30).await;
 
         assert!(result.is_ok());
-        let slots = result.unwrap();
+        let (slots, chain_tip) = result.unwrap();
         assert_eq!(slots.len(), 30);
         assert_eq!(slots[0], 100);
         assert_eq!(slots[29], 129);
+        assert_eq!(chain_tip, 150);
     }
 
     #[tokio::test]
@@ -298,8 +333,9 @@ mod tests {
         let result = poller.get_slots_to_process(100, 30).await;
 
         assert!(result.is_ok());
-        let slots = result.unwrap();
+        let (slots, chain_tip) = result.unwrap();
         assert!(slots.is_empty());
+        assert_eq!(chain_tip, 100);
     }
 
     // ============================================================================
@@ -310,32 +346,72 @@ mod tests {
     async fn test_get_blocks_batch_multiple_blocks() {
         let mut server = Server::new_async().await;
 
-        // Mock expects 3 requests - mockito will match them in order
-        let _m1 = mock_rpc_success(
-            &mut server,
-            r#"{
-                "blockhash": "Block100",
-                "parentSlot": 99,
-                "transactions": []
-            }"#,
-        )
-        .await
-        .expect(1);
+        // Use body matchers so each mock responds to its specific slot,
+        // regardless of the order concurrent requests arrive.
+        let _m1 = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::PartialJson(json!({
+                "method": "getBlock",
+                "params": [100]
+            })))
+            .with_status(200)
+            .with_body(
+                json!({
+                    "jsonrpc": "2.0",
+                    "result": {
+                        "blockhash": "Block100",
+                        "parentSlot": 99,
+                        "transactions": []
+                    },
+                    "id": 1
+                })
+                .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
 
-        let _m2 = mock_rpc_error(&mut server, -32009, "Slot was skipped")
-            .await
-            .expect(1);
+        let _m2 = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::PartialJson(json!({
+                "method": "getBlock",
+                "params": [101]
+            })))
+            .with_status(200)
+            .with_body(
+                json!({
+                    "jsonrpc": "2.0",
+                    "error": { "code": -32009, "message": "Slot was skipped" },
+                    "id": 1
+                })
+                .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
 
-        let _m3 = mock_rpc_success(
-            &mut server,
-            r#"{
-                "blockhash": "Block102",
-                "parentSlot": 101,
-                "transactions": []
-            }"#,
-        )
-        .await
-        .expect(1);
+        let _m3 = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::PartialJson(json!({
+                "method": "getBlock",
+                "params": [102]
+            })))
+            .with_status(200)
+            .with_body(
+                json!({
+                    "jsonrpc": "2.0",
+                    "result": {
+                        "blockhash": "Block102",
+                        "parentSlot": 101,
+                        "transactions": []
+                    },
+                    "id": 1
+                })
+                .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
 
         let poller = RpcPoller::new(
             server.url(),

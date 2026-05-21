@@ -1,9 +1,56 @@
+# Compose project name.
+name: private-channel
+
+# Build-arg anchor for Solana toolchain consumers.
+# Values come from versions.env — invoke compose with
+# `--env-file versions.env --env-file .env` (later files win on conflict).
+x-solana-build-args: &solana-build-args
+  SOLANA_VERSION: ${SOLANA_VERSION}
+  PNPM_VERSION: ${PNPM_VERSION}
+
+x-validator-build-args: &validator-build-args
+  SOLANA_VERSION: ${SOLANA_VERSION}
+  YELLOWSTONE_TAG: ${YELLOWSTONE_TAG}
+
+# Default healthcheck timings — 10s interval keeps probe load light, 3s timeout
+# fails fast on a wedged service, 5 retries gives ~50s of hysteresis to absorb
+# transients. start_period overrides per service below where boot is slow.
+x-default-healthcheck: &default-healthcheck
+  interval: 10s
+  timeout: 3s
+  retries: 5
+  start_period: 30s
+
+# Default logging policy — rotates each service's stdout/stderr at 100MB per file
+# with 5 files retained (=~500MB ceiling per container). Lives in compose so the
+# policy travels with the repo to any deploy target, instead of relying on the
+# host's daemon.json.
+x-default-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "100m"
+    max-file: "5"
+
+# Shared image+build for every Rust service that compiles from the main Dockerfile.
+# All such services share one byte-identical image; per-service tags would be
+# 9 copies of the same artifact differing only in compose metadata. Each service
+# overrides only `command:` (and per-service env). Pin in CI via
+# PRIVATE_CHANNEL_VERSION; defaults to `latest` for local dev. Validator, prometheus,
+# grafana and admin-ui use their own Dockerfiles and keep their own build blocks.
+x-private-channel-app: &private-channel-app
+  image: private-channel-app:${PRIVATE_CHANNEL_VERSION:-latest}
+  build:
+    context: .
+    dockerfile: Dockerfile
+    args: *solana-build-args
+
 services:
   # PostgreSQL Primary (for write node)
   postgres-primary:
     image: postgres:16-alpine
-    container_name: contra-postgres-primary
+    container_name: private-channel-postgres-primary
     restart: unless-stopped
+    logging: *default-logging
     environment:
       - POSTGRES_DB=${POSTGRES_DB}
       - POSTGRES_USER=${POSTGRES_USER}
@@ -18,8 +65,12 @@ services:
       - "5432:5432"
     volumes:
       - postgres-primary-data:/var/lib/postgresql/data
+      - postgres-primary-wal-archive:/wal_archive
       - ./init-primary.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
       - ./init-primary-hba.sh:/docker-entrypoint-initdb.d/02-hba.sh:ro
+    # `synchronous_commit` defaults to `on` (full crash durability). The bench
+    # profile in bench-tps/.env explicitly opts into `off` for throughput;
+    # operators who want the same trade-off in production must do so deliberately.
     command: |
       postgres
       -c wal_level=replica
@@ -29,10 +80,14 @@ services:
       -c hot_standby_feedback=on
       -c wal_log_hints=on
       -c archive_mode=on
-      -c archive_command='/bin/true'
+      -c archive_command='cp %p /wal_archive/%f.tmp && mv /wal_archive/%f.tmp /wal_archive/%f'
       -c listen_addresses='*'
+      -c shared_buffers=${PRIVATE_CHANNEL_PG_SHARED_BUFFERS:-4GB}
+      -c synchronous_commit=${PRIVATE_CHANNEL_PG_SYNCHRONOUS_COMMIT:-on}
+      -c wal_compression=${PRIVATE_CHANNEL_PG_WAL_COMPRESSION:-lz4}
+      -c max_wal_size=${PRIVATE_CHANNEL_PG_MAX_WAL_SIZE:-4GB}
     networks:
-      - contra-network
+      - private-channel-network
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
       interval: 10s
@@ -41,37 +96,53 @@ services:
 
   # Write Node (formerly sequencer)
   write-node:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: contra-write-node
+    <<: *private-channel-app
+    container_name: private-channel-write-node
     restart: unless-stopped
+    logging: *default-logging
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     depends_on:
-      - postgres-primary
+      postgres-primary:
+        condition: service_healthy
     environment:
       - RUST_LOG=info
-      - CONTRA_PORT=${CONTRA_WRITE_PORT}
-      - CONTRA_ACCOUNTSDB_CONNECTION_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-primary:5432/${POSTGRES_DB}
-      - CONTRA_ENABLE_READ=false
-      - CONTRA_SIGVERIFY_QUEUE_SIZE=${CONTRA_SIGVERIFY_QUEUE_SIZE}
-      - CONTRA_SIGVERIFY_WORKERS=${CONTRA_SIGVERIFY_WORKERS}
-      - CONTRA_MAX_CONNECTIONS=${CONTRA_WRITE_MAX_CONNECTIONS}
-      - CONTRA_MAX_TX_PER_BATCH=${CONTRA_MAX_TX_PER_BATCH}
-      - CONTRA_LOG_LEVEL=info
-      - CONTRA_JSON_LOGS=false
-      - CONTRA_MODE=write
-      - CONTRA_ADMIN_KEYS=${CONTRA_ADMIN_KEYS}
+      - PRIVATE_CHANNEL_PORT=${PRIVATE_CHANNEL_WRITE_PORT}
+      - PRIVATE_CHANNEL_ACCOUNTSDB_CONNECTION_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-primary:5432/${POSTGRES_DB}
+      - PRIVATE_CHANNEL_ENABLE_READ=false
+      - PRIVATE_CHANNEL_SIGVERIFY_QUEUE_SIZE=${PRIVATE_CHANNEL_SIGVERIFY_QUEUE_SIZE}
+      - PRIVATE_CHANNEL_SIGVERIFY_WORKERS=${PRIVATE_CHANNEL_SIGVERIFY_WORKERS}
+      - PRIVATE_CHANNEL_MAX_CONNECTIONS=${PRIVATE_CHANNEL_WRITE_MAX_CONNECTIONS}
+      - PRIVATE_CHANNEL_PG_MAX_CONNECTIONS=${PRIVATE_CHANNEL_PG_MAX_CONNECTIONS:-32}
+      - PRIVATE_CHANNEL_MAX_TX_PER_BATCH=${PRIVATE_CHANNEL_MAX_TX_PER_BATCH}
+      - PRIVATE_CHANNEL_BATCH_DEADLINE_MS=${PRIVATE_CHANNEL_BATCH_DEADLINE_MS:-10}
+      - PRIVATE_CHANNEL_BATCH_CHANNEL_CAPACITY=${PRIVATE_CHANNEL_BATCH_CHANNEL_CAPACITY:-16}
+      - PRIVATE_CHANNEL_MAX_SVM_WORKERS=${PRIVATE_CHANNEL_MAX_SVM_WORKERS:-8}
+      - PRIVATE_CHANNEL_LOG_LEVEL=info
+      - PRIVATE_CHANNEL_JSON_LOGS=false
+      - PRIVATE_CHANNEL_MODE=write
+      - PRIVATE_CHANNEL_ADMIN_KEYS=${PRIVATE_CHANNEL_ADMIN_KEYS}
+      - PRIVATE_CHANNEL_METRICS=${PRIVATE_CHANNEL_METRICS:-false}
+      - PRIVATE_CHANNEL_METRICS_PORT=${PRIVATE_CHANNEL_METRICS_PORT:-9090}
     ports:
-      - "${CONTRA_WRITE_PORT}:${CONTRA_WRITE_PORT}"
-    command: ["/usr/local/bin/node"]
+      - "${PRIVATE_CHANNEL_WRITE_PORT}:${PRIVATE_CHANNEL_WRITE_PORT}"
+    command: ["/usr/local/bin/private-channel-node"]
     networks:
-      - contra-network
+      - private-channel-network
+    # Real probe — /health dispatches getEpochSchedule through the in-process RPC
+    # module and returns 503 if the call fails. Fails when the RPC pipeline is dead.
+    healthcheck:
+      <<: *default-healthcheck
+      test: ["CMD-SHELL", "curl -fsS http://localhost:${PRIVATE_CHANNEL_WRITE_PORT}/health || exit 1"]
 
   # PostgreSQL Replica (for read node)
   postgres-replica:
     image: postgres:16-alpine
-    container_name: contra-postgres-replica
+    container_name: private-channel-postgres-replica
     restart: unless-stopped
+    logging: *default-logging
     depends_on:
       postgres-primary:
         condition: service_healthy
@@ -109,7 +180,7 @@ services:
         postgres
       "
     networks:
-      - contra-network
+      - private-channel-network
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
       interval: 10s
@@ -118,37 +189,50 @@ services:
 
   # Read Node
   read-node:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: contra-read-node
+    <<: *private-channel-app
+    container_name: private-channel-read-node
     restart: unless-stopped
+    logging: *default-logging
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     depends_on:
-      - postgres-replica
-      - write-node
+      postgres-replica:
+        condition: service_healthy
+      write-node:
+        condition: service_started
     environment:
       - RUST_LOG=info
-      - CONTRA_PORT=${CONTRA_READ_PORT}
-      - CONTRA_ACCOUNTSDB_CONNECTION_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-replica:5432/${POSTGRES_DB}
-      - CONTRA_MAX_CONNECTIONS=${CONTRA_READ_MAX_CONNECTIONS}
-      - CONTRA_ENABLE_WRITE=false
-      - CONTRA_ENABLE_READ=true
-      - CONTRA_LOG_LEVEL=info
-      - CONTRA_JSON_LOGS=false
-      - CONTRA_MODE=read
+      - PRIVATE_CHANNEL_PORT=${PRIVATE_CHANNEL_READ_PORT}
+      - PRIVATE_CHANNEL_ACCOUNTSDB_CONNECTION_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-replica:5432/${POSTGRES_DB}
+      - PRIVATE_CHANNEL_MAX_CONNECTIONS=${PRIVATE_CHANNEL_READ_MAX_CONNECTIONS}
+      - PRIVATE_CHANNEL_PG_MAX_CONNECTIONS=${PRIVATE_CHANNEL_PG_MAX_CONNECTIONS:-32}
+      - PRIVATE_CHANNEL_ENABLE_WRITE=false
+      - PRIVATE_CHANNEL_ENABLE_READ=true
+      - PRIVATE_CHANNEL_LOG_LEVEL=info
+      - PRIVATE_CHANNEL_JSON_LOGS=false
+      - PRIVATE_CHANNEL_MODE=read
     ports:
-      - "${CONTRA_READ_PORT}:${CONTRA_READ_PORT}"
-    command: ["/usr/local/bin/node"]
+      - "${PRIVATE_CHANNEL_READ_PORT}:${PRIVATE_CHANNEL_READ_PORT}"
+    command: ["/usr/local/bin/private-channel-node"]
     networks:
-      - contra-network
+      - private-channel-network
+    # Real probe — same /health implementation as write-node, against the replica pool.
+    healthcheck:
+      <<: *default-healthcheck
+      test: ["CMD-SHELL", "curl -fsS http://localhost:${PRIVATE_CHANNEL_READ_PORT}/health || exit 1"]
 
   # Gateway (Routes requests between write and read nodes)
   gateway:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: contra-gateway
+    <<: *private-channel-app
+    container_name: private-channel-gateway
     restart: unless-stopped
+    logging: *default-logging
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     depends_on:
       - write-node
       - read-node
@@ -157,55 +241,102 @@ services:
       - GATEWAY_PORT=${GATEWAY_PORT}
       - GATEWAY_WRITE_URL=${GATEWAY_WRITE_URL}
       - GATEWAY_READ_URL=${GATEWAY_READ_URL}
+      - METRICS_PORT=9101
+      # Optional — omit or leave blank to disable RBAC enforcement.
+      - JWT_SECRET=${JWT_SECRET:-}
+      - AUTH_DATABASE_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-primary:5432/${POSTGRES_DB}
+      - AUTH_DATABASE_MAX_CONNECTIONS=${AUTH_DATABASE_MAX_CONNECTIONS:-10}
     ports:
       - "${GATEWAY_PORT}:${GATEWAY_PORT}"
     command: ["/usr/local/bin/gateway"]
     networks:
-      - contra-network
+      - private-channel-network
+    # Liveness only — /health returns static 200. Gateway deliberately
+    # doesn't probe its upstreams; their own probes report their state, and
+    # restarting the gateway when an upstream is down doesn't fix anything.
+    # /ready (separate endpoint, probes both backends, cached 2s) exists for
+    # out-of-band monitoring; compose stays on /health.
+    healthcheck:
+      <<: *default-healthcheck
+      test: ["CMD-SHELL", "curl -fsS http://localhost:${GATEWAY_PORT}/health || exit 1"]
 
-  # Activity Generator
-  activity:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: contra-activity
+  # Auth Service (optional — run with: docker compose --profile auth up)
+  auth:
+    profiles: [auth]
+    <<: *private-channel-app
+    container_name: private-channel-auth
     restart: unless-stopped
+    logging: *default-logging
     depends_on:
-      - write-node
-      - read-node
+      postgres-primary:
+        condition: service_healthy
     environment:
       - RUST_LOG=info
-    volumes:
-      - ./keypairs:/keypairs:ro
-    command:
-      [
-        "/usr/local/bin/activity",
-        "--rpc-url",
-        "${GATEWAY_URL}",
-        "--admin-keypair",
-        "/keypairs/admin.json",
-        "--users",
-        "1000",
-        "--initial-balance",
-        "10000",
-        "--user-delay-ms",
-        "1000",
-        "--admin-delay-ms",
-        "10000",
-        "-v",
-      ]
+      - AUTH_PORT=${AUTH_PORT}
+      - AUTH_DATABASE_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-primary:5432/${POSTGRES_DB}
+      - JWT_SECRET=${JWT_SECRET}
+      - CORS_ALLOWED_ORIGIN=${CORS_ALLOWED_ORIGIN:-*}
+      - AUTH_DATABASE_MAX_CONNECTIONS=${AUTH_DATABASE_MAX_CONNECTIONS:-10}
+    ports:
+      - "${AUTH_PORT}:${AUTH_PORT}"
+    command: ["/usr/local/bin/auth"]
     networks:
-      - contra-network
+      - private-channel-network
+    # /health reads a pool-status flag updated by handlers after each DB call.
+    # Communication errors flip it unhealthy; logical errors (UNIQUE etc.)
+    # leave it healthy. The probe itself doesn't take a connection from the
+    # pool, so probe load can't contribute to pool exhaustion.
+    healthcheck:
+      <<: *default-healthcheck
+      test: ["CMD-SHELL", "curl -fsS http://localhost:${AUTH_PORT}/health || exit 1"]
+
+  # WebSocket Transaction Streamer
+  streamer:
+    <<: *private-channel-app
+    container_name: private-channel-streamer
+    restart: unless-stopped
+    logging: *default-logging
+    depends_on:
+      postgres-replica:
+        condition: service_healthy
+      write-node:
+        condition: service_healthy
+      postgres-indexer:
+        condition: service_healthy
+    environment:
+      - RUST_LOG=info
+      - STREAMER_PORT=${STREAMER_PORT:-8902}
+      - STREAMER_ACCOUNTSDB_CONNECTION_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-replica:5432/${POSTGRES_DB}
+      - STREAMER_DATABASE_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-indexer:5432/${POSTGRES_INDEXER_DB}
+      - STREAMER_POLL_INTERVAL_MS=200
+      - STREAMER_LOG_LEVEL=info
+    ports:
+      - "${STREAMER_PORT:-8902}:${STREAMER_PORT:-8902}"
+    command: ["/usr/local/bin/streamer"]
+    networks:
+      - private-channel-network
+    # /health checks each running poll loop's heartbeat — flips 503 if any
+    # has gone stale (>30s). Empty queries still bump the heartbeat, so a
+    # quiet DB stays healthy; only a truly stuck loop trips the probe.
+    healthcheck:
+      <<: *default-healthcheck
+      test: ["CMD-SHELL", "curl -fsS http://localhost:${STREAMER_PORT:-8902}/health || exit 1"]
 
   # Solana Validator with Yellowstone gRPC Plugin
   validator:
     build:
       context: .
       dockerfile: validator.Dockerfile
-    container_name: contra-validator
+      args: *validator-build-args
+    container_name: private-channel-validator
     restart: unless-stopped
+    logging: *default-logging
     deploy:
       replicas: 1
+    # Agave 3.1 asserts io_uring_supported(); Docker's default seccomp profile
+    # blocks io_uring_setup, so the validator panics at startup without this.
+    security_opt:
+      - seccomp=unconfined
     ports:
       - "18899:8899"
       - "18900:8900"
@@ -219,29 +350,40 @@ services:
       - RUST_LOG=info
       - ESCROW_PROGRAM_ID=${ESCROW_PROGRAM_ID}
       - WITHDRAW_PROGRAM_ID=${WITHDRAW_PROGRAM_ID}
+    # VALIDATOR_RESET_FLAG defaults to --reset (today's behavior: wipe ledger
+    # at every container start). Set it blank to preserve /validator-data
+    # across restarts so on-chain state stays consistent with Postgres rows.
+    # --limit-ledger-size caps the rocksdb blockstore at ~1M shreds (~1 GB);
+    # without this the test-validator default of 10000 shreds wraps too fast
+    # for the indexer to keep up. AccountsDB has no explicit cap but is
+    # naturally bounded by Solana Private Channels's PDA/ATA count; `make docker-clean` is
+    # the floor if /validator-data ever needs reclaiming.
     command: >
       solana-test-validator
-      --reset
-      --bpf-program ${ESCROW_PROGRAM_ID} /programs/contra_escrow_program.so
-      --bpf-program ${WITHDRAW_PROGRAM_ID} /programs/contra_withdraw_program.so
-      --clone TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA
-      --clone TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb
+      ${VALIDATOR_RESET_FLAG---reset}
+      --limit-ledger-size 1000000
+      --bpf-program ${ESCROW_PROGRAM_ID} /programs/private_channel_escrow_program.so
+      --bpf-program ${WITHDRAW_PROGRAM_ID} /programs/private_channel_withdraw_program.so
+      --clone-upgradeable-program TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA
+      --clone-upgradeable-program TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb
       --clone ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL
       --url https://api.mainnet-beta.solana.com
       --geyser-plugin-config /config/yellowstone-config.json
     networks:
-      - contra-network
+      - private-channel-network
     healthcheck:
       test: ["CMD-SHELL", "solana cluster-version || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 30s
 
   # PostgreSQL for Indexer
   postgres-indexer:
     image: postgres:16-alpine
-    container_name: contra-postgres-indexer
+    container_name: private-channel-postgres-indexer
     restart: unless-stopped
+    logging: *default-logging
     environment:
       - POSTGRES_DB=${POSTGRES_INDEXER_DB}
       - POSTGRES_USER=${POSTGRES_USER}
@@ -250,8 +392,15 @@ services:
       - "5434:5432"
     volumes:
       - postgres-indexer-data:/var/lib/postgresql/data
+      - postgres-indexer-wal-archive:/wal_archive
+    command: |
+      postgres
+      -c wal_level=replica
+      -c archive_mode=on
+      -c archive_command='cp %p /wal_archive/%f.tmp && mv /wal_archive/%f.tmp /wal_archive/%f'
+      -c listen_addresses='*'
     networks:
-      - contra-network
+      - private-channel-network
     healthcheck:
       test:
         [
@@ -264,11 +413,12 @@ services:
 
   # Indexer Service - Solana (Yellowstone)
   indexer-solana:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: contra-indexer-solana
+    <<: *private-channel-app
+    container_name: private-channel-indexer-solana
     restart: unless-stopped
+    logging: *default-logging
+    # tini as PID 1 so SIGTERM reaches the binary through the /bin/sh -c wrapper.
+    init: true
     deploy:
       replicas: 1
     depends_on:
@@ -277,8 +427,17 @@ services:
       validator:
         condition: service_healthy
     environment:
-      - RUST_LOG=info,contra_indexer=debug
+      - RUST_LOG=info,private_channel_indexer=debug
       - DATABASE_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-indexer:5432/${POSTGRES_INDEXER_DB}
+      - COMMON_RPC_URL=${LOCAL_VALIDATOR_RPC_URL}
+      - INDEXER_YELLOWSTONE_ENDPOINT=http://validator:10000
+      - METRICS_PORT=9100
+      - ALERT_WEBHOOK_URL=${ALERT_WEBHOOK_URL:-http://localhost:9/no-op}
+      # Injected by bench-tps/scripts/run.sh, the full-stack orchestration script that
+      # derives the escrow instance PDA and writes it to .env before starting services.
+      # When absent (e.g. manual `docker compose up`), the TOML config's
+      # escrow_instance_id is used — update that value to match your deployment.
+      - COMMON_ESCROW_INSTANCE_ID
     volumes:
       - ./indexer/config:/config:ro
     command:
@@ -290,26 +449,37 @@ services:
           -v \
           indexer
     networks:
-      - contra-network
+      - private-channel-network
+    # /health on the metrics port reads HealthState — backed by the indexer's
+    # slot-lag gauge and a heartbeat that bumps on each SlotComplete. With
+    # require_continuous_progress=true, a dead Yellowstone stream flips the
+    # probe even when slot-lag is 0.
+    healthcheck:
+      <<: *default-healthcheck
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9100/health || exit 1"]
 
-  # Indexer Service - Contra (RPC Polling)
-  indexer-contra:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: contra-indexer-contra
+  # Indexer Service - Solana Private Channels (RPC Polling)
+  indexer-private-channel:
+    <<: *private-channel-app
+    container_name: private-channel-indexer-private-channel
     restart: unless-stopped
+    logging: *default-logging
+    init: true
     deploy:
       replicas: 1
     depends_on:
       postgres-indexer:
         condition: service_healthy
-      validator:
-        condition: service_healthy
+      # Watches Solana Private Channels write-node for WithdrawFunds instructions
+      gateway:
+        condition: service_started
     environment:
-      - RUST_LOG=info,contra_indexer=debug
+      - RUST_LOG=info,private_channel_indexer=debug
       - DATABASE_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-indexer:5432/${POSTGRES_INDEXER_DB}
-      - COMMON_RPC_URL=${LOCAL_VALIDATOR_RPC_URL}
+      # rpc_url = Solana Private Channels gateway — polls for WithdrawFunds (burn) instructions on Solana Private Channels.
+      - COMMON_RPC_URL=http://gateway:${GATEWAY_PORT}
+      - METRICS_PORT=9100
+      - ALERT_WEBHOOK_URL=${ALERT_WEBHOOK_URL:-http://localhost:9/no-op}
     volumes:
       - ./indexer/config:/config:ro
     command:
@@ -317,30 +487,50 @@ services:
       - -c
       - |
         /usr/local/bin/indexer \
-          --config /config/local/indexer-contra.toml \
+          --config /config/local/indexer-private-channel.toml \
           -v \
           indexer
     networks:
-      - contra-network
+      - private-channel-network
+    # See indexer-solana — same heartbeat-backed /health.
+    healthcheck:
+      <<: *default-healthcheck
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9100/health || exit 1"]
 
   # Operator Service - Solana
   operator-solana:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: contra-operator-solana
+    <<: *private-channel-app
+    container_name: private-channel-operator-solana
     restart: unless-stopped
+    logging: *default-logging
+    init: true
     depends_on:
       postgres-indexer:
         condition: service_healthy
+      write-node:
+        condition: service_healthy
     environment:
-      - RUST_LOG=info,contra_indexer=debug
+      - RUST_LOG=info,private_channel_indexer=debug
       - DATABASE_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-indexer:5432/${POSTGRES_INDEXER_DB}
-      - COMMON_RPC_URL=${LOCAL_VALIDATOR_RPC_URL}
+      # rpc_url = Solana Private Channels gateway (routes reads→read-node, writes→write-node)
+      - COMMON_RPC_URL=http://gateway:${GATEWAY_PORT}
+      # source_rpc_url = Solana Solana validator 
+      - COMMON_SOURCE_RPC_URL=${LOCAL_VALIDATOR_RPC_URL}
+      # Injected by bench-tps/scripts/run.sh, the full-stack orchestration script that
+      # derives the escrow instance PDA and writes it to .env before starting services.
+      # When absent (e.g. manual `docker compose up`), the TOML config's
+      # escrow_instance_id is used — update that value to match your deployment.
+      - COMMON_ESCROW_INSTANCE_ID
       - ADMIN_SIGNER=memory
       - ADMIN_PRIVATE_KEY=${ADMIN_PRIVATE_KEY}
       - OPERATOR_SIGNER=memory
       - OPERATOR_PRIVATE_KEY=${ADMIN_PRIVATE_KEY}
+      - METRICS_PORT=9102
+      - ALERT_WEBHOOK_URL=${ALERT_WEBHOOK_URL:-http://localhost:9/no-op}
+    ports:
+      # Exposed to host so bench-tps can scrape private_channel_operator_mints_sent_total
+      # from outside Docker for e2e deposit measurement (BENCH_INDEXER_METRICS_URL).
+      - "9102:9102"
     volumes:
       - ./indexer/config:/config:ro
     command:
@@ -352,26 +542,45 @@ services:
           -v \
           operator
     networks:
-      - contra-network
+      - private-channel-network
+    # /health on the metrics port reads HealthState — backlog comes from the
+    # operator's pending-tx count, progress bumps as txs are forwarded to the
+    # processor. Idle (pending=0) stays healthy.
+    healthcheck:
+      <<: *default-healthcheck
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9102/health || exit 1"]
 
-  # Operator Service - Contra
-  operator-contra:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: contra-operator-contra
+  # Operator Service - Solana Private Channels
+  operator-private-channel:
+    <<: *private-channel-app
+    container_name: private-channel-operator-private-channel
     restart: unless-stopped
+    logging: *default-logging
+    init: true
     depends_on:
       postgres-indexer:
         condition: service_healthy
     environment:
-      - RUST_LOG=info,contra_indexer=debug
+      - RUST_LOG=info,private_channel_indexer=debug
       - DATABASE_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-indexer:5432/${POSTGRES_INDEXER_DB}
+      # rpc_url = Solana Solana validator (where ReleaseFunds transactions are sent)
       - COMMON_RPC_URL=${LOCAL_VALIDATOR_RPC_URL}
+      # source_rpc_url = Solana Private Channels gateway (source of withdrawal/burn state)
+      - COMMON_SOURCE_RPC_URL=http://gateway:${GATEWAY_PORT}
       - ADMIN_SIGNER=memory
       - ADMIN_PRIVATE_KEY=${ADMIN_PRIVATE_KEY}
       - OPERATOR_SIGNER=memory
       - OPERATOR_PRIVATE_KEY=${ADMIN_PRIVATE_KEY}
+      # Patched into .env by run.sh before `docker compose up` runs.
+      # Passed through from the host shell — run.sh exports it via
+      # `set -a; source .env; set +a` so this picks it up automatically.
+      - COMMON_ESCROW_INSTANCE_ID
+      - METRICS_PORT=9103
+      - ALERT_WEBHOOK_URL=${ALERT_WEBHOOK_URL:-http://localhost:9/no-op}
+    ports:
+      # Exposed to host so bench-tps can scrape private_channel_operator_mints_sent_total
+      # from outside Docker for e2e withdraw measurement (BENCH_WITHDRAW_OPERATOR_METRICS_URL).
+      - "9103:9103"
     volumes:
       - ./indexer/config:/config:ro
     command:
@@ -379,17 +588,90 @@ services:
       - -c
       - |
         /usr/local/bin/indexer \
-          --config /config/local/operator-contra.toml \
+          --config /config/local/operator-private-channel.toml \
           -v \
           operator
     networks:
-      - contra-network
+      - private-channel-network
+    # /health on the metrics port reads HealthState — backlog comes from the
+    # operator's pending-tx count, progress bumps as txs are forwarded to the
+    # processor. Idle (pending=0) stays healthy.
+    healthcheck:
+      <<: *default-healthcheck
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9103/health || exit 1"]
+
+  # Base backup sidecar for postgres-primary
+  pg-backup-primary:
+    image: postgres:16-alpine
+    container_name: private-channel-pg-backup-primary
+    restart: unless-stopped
+    logging: *default-logging
+    depends_on:
+      postgres-primary:
+        condition: service_healthy
+    # TODO: pg_basebackup fails because POSTGRES_USER ("private_channel") lacks the
+    # REPLICATION attribute and isn't in pg_hba.conf for replication. Switch
+    # to POSTGRES_REPLICATION_USER/_PASSWORD (already used by the streaming
+    # replica). Pre-existing gap; backups currently never complete.
+    environment:
+      - PGHOST=postgres-primary
+      - PGUSER=${POSTGRES_USER}
+      - PGPASSWORD=${POSTGRES_PASSWORD}
+      - PG_BACKUP_INTERVAL_HOURS=${PG_BACKUP_INTERVAL_HOURS:-6}
+      - PG_BACKUP_RETENTION_COUNT=${PG_BACKUP_RETENTION_COUNT:-3}
+    volumes:
+      - postgres-primary-basebackups:/backups
+      - postgres-primary-wal-archive:/wal_archive
+      - ./scripts/pg-backup.sh:/usr/local/bin/pg-backup.sh:ro
+    command: ["/usr/local/bin/pg-backup.sh"]
+    networks:
+      - private-channel-network
+
+  # Base backup sidecar for postgres-indexer
+  pg-backup-indexer:
+    image: postgres:16-alpine
+    container_name: private-channel-pg-backup-indexer
+    restart: unless-stopped
+    logging: *default-logging
+    depends_on:
+      postgres-indexer:
+        condition: service_healthy
+    # TODO: same pg_hba/role mismatch as pg-backup-primary above.
+    environment:
+      - PGHOST=postgres-indexer
+      - PGUSER=${POSTGRES_USER}
+      - PGPASSWORD=${POSTGRES_PASSWORD}
+      - PG_BACKUP_INTERVAL_HOURS=${PG_BACKUP_INTERVAL_HOURS:-6}
+      - PG_BACKUP_RETENTION_COUNT=${PG_BACKUP_RETENTION_COUNT:-3}
+    volumes:
+      - postgres-indexer-basebackups:/backups
+      - postgres-indexer-wal-archive:/wal_archive
+      - ./scripts/pg-backup.sh:/usr/local/bin/pg-backup.sh:ro
+    command: ["/usr/local/bin/pg-backup.sh"]
+    networks:
+      - private-channel-network
+
+  # Blackbox Exporter for HTTP health probing
+  blackbox-exporter:
+    image: prom/blackbox-exporter:${BLACKBOX_VERSION}
+    container_name: private-channel-blackbox-exporter
+    restart: unless-stopped
+    logging: *default-logging
+    networks:
+      - private-channel-network
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://localhost:9115/-/healthy || exit 1"]
+      interval: 30s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
 
   # cAdvisor for container metrics
   cadvisor:
-    image: gcr.io/cadvisor/cadvisor:latest
-    container_name: contra-cadvisor
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    container_name: private-channel-cadvisor
     restart: unless-stopped
+    logging: *default-logging
     ports:
       - "8080:8080"
     volumes:
@@ -400,49 +682,90 @@ services:
       - /dev/disk/:/dev/disk:ro
     privileged: true
     networks:
-      - contra-network
+      - private-channel-network
+    # No healthcheck — the cadvisor image is distroless (no shell, no wget/curl).
+    # Restart-on-crash via `restart: unless-stopped` is the only liveness signal.
+    # An out-of-process probe (Prometheus scrape failure on the cadvisor target)
+    # is the right monitoring path here.
 
   # Prometheus for metrics collection
   prometheus:
-    image: prom/prometheus:latest
-    container_name: contra-prometheus
+    build:
+      context: .
+      dockerfile: Dockerfile.prometheus
+      args:
+        PROMETHEUS_VERSION: ${PROMETHEUS_VERSION}
+    container_name: private-channel-prometheus
     restart: unless-stopped
+    logging: *default-logging
     ports:
       - "9090:9090"
     volumes:
-      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus-data:/prometheus
-    command:
-      - "--config.file=/etc/prometheus/prometheus.yml"
-      - "--storage.tsdb.path=/prometheus"
-      - "--web.console.libraries=/usr/share/prometheus/console_libraries"
-      - "--web.console.templates=/usr/share/prometheus/consoles"
+    environment:
+      - HOST_SUFFIX=
+      - BENCH_METRICS_TARGET=${BENCH_METRICS_TARGET:-host.docker.internal:9101}
+      - PRIVATE_CHANNEL_METRICS_PORT=${PRIVATE_CHANNEL_METRICS_PORT:-9090}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     networks:
-      - contra-network
+      - private-channel-network
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://localhost:9090/-/healthy || exit 1"]
+      interval: 30s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
 
-  # Grafana for visualization
+  # Grafana for visualization. Uses Dockerfile.grafana so the image bakes in
+  # provisioning + dashboards (matters for standalone deployments where bind
+  # mounts aren't available). Locally the bind mounts below shadow the baked
+  # content so edits hot-reload without rebuilding.
   grafana:
-    image: grafana/grafana:latest
-    container_name: contra-grafana
+    build:
+      context: .
+      dockerfile: Dockerfile.grafana
+      args:
+        GRAFANA_VERSION: ${GRAFANA_VERSION}
+    container_name: private-channel-grafana
     restart: unless-stopped
+    logging: *default-logging
     ports:
       - "37429:3000"
     volumes:
       - grafana-data:/var/lib/grafana
+      - ./monitoring/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/dashboards:/var/lib/grafana/dashboards:ro
     environment:
       - GF_SECURITY_ADMIN_PASSWORD=${GF_ADMIN_PASSWORD}
       - GF_USERS_ALLOW_SIGN_UP=false
+      - POSTGRES_INDEXER_DB=${POSTGRES_INDEXER_DB}
+      - POSTGRES_INDEXER_HOST=${POSTGRES_INDEXER_HOST:-postgres-indexer}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - PROMETHEUS_URL=${PROMETHEUS_URL:-http://prometheus:9090}
+      - ALERT_WEBHOOK_URL=${ALERT_WEBHOOK_URL:-http://localhost:9/no-op}
     networks:
-      - contra-network
+      - private-channel-network
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://localhost:3000/api/health || exit 1"]
+      interval: 30s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
 
 volumes:
   postgres-primary-data:
   postgres-replica-data:
   postgres-indexer-data:
+  postgres-primary-wal-archive:
+  postgres-indexer-wal-archive:
+  postgres-primary-basebackups:
+  postgres-indexer-basebackups:
   validator-data:
   prometheus-data:
   grafana-data:
 
 networks:
-  contra-network:
+  private-channel-network:
     driver: bridge

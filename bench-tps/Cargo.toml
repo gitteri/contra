@@ -1,0 +1,33 @@
+[package]
+name = "private-channel-bench-tps"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "private-channel-bench-tps"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0"
+async-channel = { workspace = true }
+clap = { workspace = true }
+private-channel-core = { workspace = true }
+private-channel-metrics = { workspace = true }
+private-channel-escrow-program-client = { workspace = true }
+private-channel-withdraw-program-client = { workspace = true }
+futures = { workspace = true }
+hex = "0.4"
+rayon = "1.10"
+serde_json = { workspace = true }
+# Pinned to 2.3.10 (matches core/indexer/integration). Workspace declares 3.0.0
+# but { workspace = true } breaks compilation — solana-sdk is still 2.x.
+solana-client = "2.3.10"
+reqwest = { workspace = true }
+solana-sdk = { workspace = true }
+solana-system-interface = { workspace = true }
+spl-associated-token-account = { workspace = true }
+spl-token = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

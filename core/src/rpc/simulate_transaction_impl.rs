@@ -1,7 +1,11 @@
 use crate::{
     accounts::utils::encode_transaction_data,
-    rpc::{error::custom_error, ReadDeps},
+    rpc::{
+        error::{custom_error, INVALID_PARAMS_CODE, JSON_RPC_SERVER_ERROR},
+        ReadDeps,
+    },
     scheduler::{ConflictFreeBatch, TransactionWithIndex},
+    stage_metrics::{NoopMetrics, SharedMetrics},
     stages::{execute_batch, get_execution_deps, sigverify_transaction, SigverifyResult},
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
@@ -40,15 +44,18 @@ pub async fn simulate_transaction(
     let encoding = config.encoding.unwrap_or(UiTransactionEncoding::Base64);
 
     // Decode the base64 transaction
-    let tx_data = STANDARD
-        .decode(&transaction)
-        .map_err(|e| custom_error(-32602, format!("Invalid base64 encoding: {}", e)))?;
+    let tx_data = STANDARD.decode(&transaction).map_err(|e| {
+        custom_error(
+            INVALID_PARAMS_CODE,
+            format!("Invalid base64 encoding: {}", e),
+        )
+    })?;
 
     // Check packet size limit (1232 bytes is Solana's PACKET_DATA_SIZE)
     const PACKET_DATA_SIZE: usize = 1232;
     if tx_data.len() > PACKET_DATA_SIZE {
         return Err(custom_error(
-            -32602,
+            INVALID_PARAMS_CODE,
             format!(
                 "Transaction too large: {} bytes (max: {} bytes)",
                 tx_data.len(),
@@ -66,7 +73,12 @@ pub async fn simulate_transaction(
     // Try to deserialize as VersionedTransaction first (standard format)
     let versioned_tx = bincode_options
         .deserialize::<VersionedTransaction>(&tx_data)
-        .map_err(|e| custom_error(-32602, format!("Failed to deserialize transaction: {}", e)))?;
+        .map_err(|e| {
+            custom_error(
+                INVALID_PARAMS_CODE,
+                format!("Failed to deserialize transaction: {}", e),
+            )
+        })?;
 
     let runtime_tx = RuntimeTransaction::try_create(
         versioned_tx,
@@ -78,7 +90,7 @@ pub async fn simulate_transaction(
         }),
         &HashSet::new(),
     )
-    .map_err(|err| custom_error(-32602, format!("invalid transaction: {err}")))?;
+    .map_err(|err| custom_error(INVALID_PARAMS_CODE, format!("invalid transaction: {err}")))?;
     let sanitized_tx = runtime_tx.into_inner_transaction();
 
     if config.sig_verify {
@@ -86,18 +98,21 @@ pub async fn simulate_transaction(
         match sigverify_result {
             SigverifyResult::InvalidTransaction(transaction_type) => {
                 return Err(custom_error(
-                    -32602,
+                    INVALID_PARAMS_CODE,
                     format!("Invalid transaction: {:?}", transaction_type),
                 ));
             }
             SigverifyResult::NotSignedByAdmin => {
                 return Err(custom_error(
-                    -32602,
+                    INVALID_PARAMS_CODE,
                     "Transaction not signed by admin".to_string(),
                 ));
             }
             SigverifyResult::SigverifyFailed(e) => {
-                return Err(custom_error(-32602, format!("Sigverify failed: {}", e)));
+                return Err(custom_error(
+                    INVALID_PARAMS_CODE,
+                    format!("Sigverify failed: {}", e),
+                ));
             }
             SigverifyResult::Valid(_) => (),
         }
@@ -110,7 +125,8 @@ pub async fn simulate_transaction(
         .accounts_db
         .get_latest_slot()
         .await
-        .map_err(|e| custom_error(-32000, format!("Failed to get slot: {}", e)))?;
+        .map_err(|e| custom_error(JSON_RPC_SERVER_ERROR, format!("Failed to get slot: {}", e)))?
+        .unwrap_or(0);
 
     let mut batch = ConflictFreeBatch::new();
     batch.add_transaction(TransactionWithIndex {
@@ -118,16 +134,22 @@ pub async fn simulate_transaction(
         index: 0,
     });
     let (_settled_accounts_tx, settled_accounts_rx) = mpsc::unbounded_channel();
+    // Simulation runs a single transaction; intra-batch parallelism is
+    // unnecessary, so disable it (max_svm_workers=1 forces sequential path).
     let mut execution_deps =
-        get_execution_deps(read_deps.accounts_db.clone(), settled_accounts_rx).await;
-    let execution_result = execute_batch(batch, &mut execution_deps).await;
+        get_execution_deps(read_deps.accounts_db.clone(), settled_accounts_rx, 1).await;
+    let noop: SharedMetrics = std::sync::Arc::new(NoopMetrics);
+    let execution_result = execute_batch(batch, &mut execution_deps, &noop).await;
 
     let result = if let Some(regular_results) = execution_result.regular_results {
         regular_results
     } else if let Some(admin_results) = execution_result.admin_results {
         admin_results
     } else {
-        return Err(custom_error(-32602, "No execution result found"));
+        return Err(custom_error(
+            INVALID_PARAMS_CODE,
+            "No execution result found",
+        ));
     };
 
     // Extract execution results
@@ -245,13 +267,16 @@ pub async fn simulate_transaction(
             }
             Err(e) => {
                 return Err(custom_error(
-                    -32602,
+                    INVALID_PARAMS_CODE,
                     format!("Transaction processing error: {:?}", e),
                 ));
             }
         }
     } else {
-        return Err(custom_error(-32602, "No execution result found"));
+        return Err(custom_error(
+            INVALID_PARAMS_CODE,
+            "No execution result found",
+        ));
     };
 
     Ok(Response {

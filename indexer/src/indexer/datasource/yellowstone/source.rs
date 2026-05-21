@@ -1,13 +1,18 @@
+use super::convert::create_message;
+use crate::metrics;
 use async_trait::async_trait;
 use futures::stream::StreamExt;
 use futures::SinkExt;
+use private_channel_metrics::MetricLabel;
 use solana_sdk::message::VersionedMessage;
 use solana_sdk::pubkey::Pubkey;
 use std::collections::HashMap;
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
+#[cfg(feature = "datasource-rpc")]
+use tracing::warn;
 use tracing::{debug, error, info};
 use yellowstone_grpc_client::{ClientTlsConfig, GeyserGrpcClient};
-use yellowstone_grpc_proto::convert_from::create_message;
 use yellowstone_grpc_proto::geyser::{
     subscribe_update::UpdateOneof, CommitmentLevel, SubscribeRequest,
     SubscribeRequestFilterBlocksMeta, SubscribeRequestFilterTransactions, SubscribeRequestPing,
@@ -20,6 +25,14 @@ use crate::indexer::datasource::common::parser::escrow::parse_escrow_instruction
 use crate::indexer::datasource::common::parser::withdraw::parse_withdraw_instruction;
 use crate::indexer::datasource::common::{datasource::DataSource, types::*};
 use crate::indexer::datasource::rpc_polling::types::InnerInstructions;
+use crate::storage::Storage;
+
+#[cfg(feature = "datasource-rpc")]
+use crate::indexer::{
+    backfill::{fill_slot_range, validate_gap},
+    checkpoint::get_last_checkpoint,
+    datasource::rpc_polling::rpc::RpcPoller,
+};
 
 /// Yellowstone gRPC datasource - directly subscribes to transactions + blocks_meta
 pub struct YellowstoneSource {
@@ -28,6 +41,15 @@ pub struct YellowstoneSource {
     commitment: String,
     program_type: ProgramType,
     escrow_instance_id: Option<Pubkey>,
+    #[cfg(feature = "datasource-rpc")]
+    rpc_poller: Option<Arc<RpcPoller>>,
+    #[cfg(feature = "datasource-rpc")]
+    max_gap_slots: u64,
+    #[cfg(feature = "datasource-rpc")]
+    batch_size: usize,
+    #[cfg(feature = "datasource-rpc")]
+    storage: Option<Arc<Storage>>,
+    health: Option<Arc<private_channel_metrics::HealthState>>,
 }
 
 impl YellowstoneSource {
@@ -44,7 +66,96 @@ impl YellowstoneSource {
             commitment,
             program_type,
             escrow_instance_id,
+            #[cfg(feature = "datasource-rpc")]
+            rpc_poller: None,
+            #[cfg(feature = "datasource-rpc")]
+            max_gap_slots: 0,
+            #[cfg(feature = "datasource-rpc")]
+            batch_size: 0,
+            #[cfg(feature = "datasource-rpc")]
+            storage: None,
+            health: None,
         }
+    }
+
+    pub fn with_health(mut self, health: Arc<private_channel_metrics::HealthState>) -> Self {
+        self.health = Some(health);
+        self
+    }
+
+    #[cfg(feature = "datasource-rpc")]
+    pub fn with_gap_detection(
+        mut self,
+        rpc_poller: Arc<RpcPoller>,
+        max_gap_slots: u64,
+        batch_size: usize,
+    ) -> Self {
+        self.rpc_poller = Some(rpc_poller);
+        self.max_gap_slots = max_gap_slots;
+        self.batch_size = batch_size;
+        self
+    }
+
+    /// Storage holds the durable checkpoint that anchors reconnect backfill.
+    /// Without it, reconnect gap-fill is a no-op.
+    #[cfg(feature = "datasource-rpc")]
+    pub fn with_storage(mut self, storage: Arc<Storage>) -> Self {
+        self.storage = Some(storage);
+        self
+    }
+}
+
+#[cfg(feature = "datasource-rpc")]
+async fn try_fill_reconnect_gap(
+    checkpoint: u64,
+    rpc_poller: &RpcPoller,
+    max_gap_slots: u64,
+    batch_size: usize,
+    program_type: ProgramType,
+    escrow_instance_id: Option<Pubkey>,
+    instruction_tx: &InstructionSender,
+) -> Result<u64, DataSourceError> {
+    let current_slot =
+        rpc_poller
+            .get_latest_slot()
+            .await
+            .map_err(|e| DataSourceError::GapFillFailed {
+                reason: format!("Failed to get latest slot: {}", e),
+            })?;
+
+    // Validate against the real checkpoint distance; the boundary slot is
+    // included only when handing off to fill_slot_range below.
+    match validate_gap(current_slot, checkpoint, max_gap_slots) {
+        Ok(None) => {
+            info!(
+                "No gap detected on reconnect. Current slot: {}, checkpoint: {}",
+                current_slot, checkpoint
+            );
+            Ok(0)
+        }
+        Ok(Some(gap)) => {
+            let replay_anchor = checkpoint.saturating_sub(1);
+            info!(
+                "Gap detected on reconnect: {} slots (replaying from {} to {}). Backfilling...",
+                gap, replay_anchor, current_slot
+            );
+            fill_slot_range(
+                rpc_poller,
+                replay_anchor,
+                current_slot,
+                batch_size,
+                program_type,
+                escrow_instance_id,
+                instruction_tx,
+            )
+            .await
+            .map_err(|e| DataSourceError::GapFillFailed {
+                reason: e.to_string(),
+            })
+        }
+        Err(e) => Err(DataSourceError::GapFillFailed {
+            reason: e.to_string(),
+        }),
     }
 }
 
@@ -72,10 +183,19 @@ impl DataSource for YellowstoneSource {
         let x_token = self.x_token.clone();
         let program_type = self.program_type;
         let escrow_instance_id = self.escrow_instance_id;
+        let health = self.health.clone();
+
+        #[cfg(feature = "datasource-rpc")]
+        let rpc_poller = self.rpc_poller.clone();
+        #[cfg(feature = "datasource-rpc")]
+        let max_gap_slots = self.max_gap_slots;
+        #[cfg(feature = "datasource-rpc")]
+        let batch_size = self.batch_size;
+        #[cfg(feature = "datasource-rpc")]
+        let storage = self.storage.clone();
 
         let handle = tokio::spawn(async move {
             loop {
-                // Check for cancellation
                 if cancellation_token.is_cancelled() {
                     info!("Yellowstone source received cancellation signal, stopping...");
                     break;
@@ -89,11 +209,15 @@ impl DataSource for YellowstoneSource {
                     escrow_instance_id,
                     tx.clone(),
                     cancellation_token.clone(),
+                    health.as_ref(),
                 )
                 .await
                 {
                     Ok(_) => {
                         info!("Yellowstone gRPC stream ended, reconnecting...");
+                        metrics::INDEXER_DATASOURCE_RECONNECTS
+                            .with_label_values(&[program_type.as_label()])
+                            .inc();
                     }
                     Err(e) => {
                         let error_msg = format!("{}", e);
@@ -101,7 +225,77 @@ impl DataSource for YellowstoneSource {
                             "Yellowstone gRPC error: {}, reconnecting in 5s...",
                             error_msg
                         );
+                        metrics::INDEXER_RPC_ERRORS
+                            .with_label_values(&[program_type.as_label(), "stream"])
+                            .inc();
+                        metrics::INDEXER_DATASOURCE_RECONNECTS
+                            .with_label_values(&[program_type.as_label()])
+                            .inc();
                         tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                    }
+                }
+
+                #[cfg(feature = "datasource-rpc")]
+                {
+                    // Anchor on the durable checkpoint, not an in-memory watermark.
+                    // BlockMeta(S) can race partial tx delivery, so replay must include S itself.
+                    // Tx/mint inserts are idempotent, so replaying the boundary slot is safe.
+                    if let (Some(ref poller), Some(ref storage)) = (&rpc_poller, &storage) {
+                        let checkpoint = match get_last_checkpoint(storage, program_type).await {
+                            Ok(slot) => slot,
+                            Err(e) => {
+                                warn!(
+                                    "Reconnect gap-fill skipped: failed to read checkpoint: {}",
+                                    e
+                                );
+                                // Backoff so a persistent storage outage paired with a
+                                // fast-failing Yellowstone endpoint can't spin the loop.
+                                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                                continue;
+                            }
+                        };
+
+                        if checkpoint == 0 {
+                            // Fresh system, startup backfill handles initial catch-up.
+                            continue;
+                        }
+
+                        match try_fill_reconnect_gap(
+                            checkpoint,
+                            poller,
+                            max_gap_slots,
+                            batch_size,
+                            program_type,
+                            escrow_instance_id,
+                            &tx,
+                        )
+                        .await
+                        {
+                            Ok(filled) => {
+                                if filled > 0 {
+                                    info!(
+                                        "Reconnect gap-fill complete: {} slots backfilled \
+                                         (from checkpoint {})",
+                                        filled, checkpoint
+                                    );
+                                }
+                            }
+                            Err(DataSourceError::GapFillFailed { ref reason })
+                                if reason.contains("Gap too large") =>
+                            {
+                                error!(
+                                    "Reconnect gap too large (checkpoint: {}): {}. \
+                                     Operator should investigate; next startup backfill will catch it.",
+                                    checkpoint, reason
+                                );
+                            }
+                            Err(e) => {
+                                warn!(
+                                    "Reconnect gap-fill failed (checkpoint: {}): {}. Continuing reconnect.",
+                                    checkpoint, e
+                                );
+                            }
+                        }
                     }
                 }
             }
@@ -118,6 +312,7 @@ impl DataSource for YellowstoneSource {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn connect_and_stream(
     endpoint: &str,
     x_token: Option<String>,
@@ -126,6 +321,7 @@ async fn connect_and_stream(
     escrow_instance_id: Option<Pubkey>,
     tx: InstructionSender,
     cancellation_token: CancellationToken,
+    health: Option<&Arc<private_channel_metrics::HealthState>>,
 ) -> Result<(), DataSourceError> {
     let mut client = GeyserGrpcClient::build_from_shared(endpoint.to_string())
         .map_err(|e| DataSourceRpcError::Protocol {
@@ -159,7 +355,7 @@ async fn connect_and_stream(
 
     let mut transaction_filters = HashMap::new();
     transaction_filters.insert(
-        "contra_program".to_string(),
+        "private_channel_program".to_string(),
         SubscribeRequestFilterTransactions {
             vote: Some(false),
             failed: Some(false),
@@ -227,6 +423,16 @@ async fn connect_and_stream(
                     }
                 }
                 Some(UpdateOneof::BlockMeta(block_meta)) => {
+                    metrics::INDEXER_CHAIN_TIP_SLOT
+                        .with_label_values(&[program_type.as_label()])
+                        .set(block_meta.slot as f64);
+                    if let Some(h) = health {
+                        // Yellowstone is push-based — a BlockMeta per slot means
+                        // we're caught up; pending stays 0. The continuous_progress
+                        // flag in HealthConfig::indexer() makes the staleness check
+                        // fire even at pending=0, so a dead stream is detected.
+                        h.set_pending(0);
+                    }
                     debug!("Yellowstone BlockMeta for slot {}", block_meta.slot);
 
                     let res = send_guaranteed(
@@ -261,6 +467,9 @@ async fn connect_and_stream(
             },
             Err(error) => {
                 error!("Geyser stream error: {error:?}");
+                metrics::INDEXER_RPC_ERRORS
+                    .with_label_values(&[program_type.as_label(), "stream"])
+                    .inc();
                 return Err(DataSourceRpcError::Protocol {
                     reason: format!("Stream error: {:?}", error),
                 }.into());
@@ -272,6 +481,186 @@ async fn connect_and_stream(
     }
 
     Ok(())
+}
+
+#[cfg(all(test, feature = "datasource-rpc"))]
+mod tests {
+    use super::*;
+    use crate::indexer::datasource::rpc_polling::rpc::RpcPoller;
+    use mockito::Server;
+    use serde_json::json;
+    use solana_sdk::commitment_config::CommitmentLevel;
+    use solana_transaction_status::UiTransactionEncoding;
+    use tokio::sync::mpsc;
+
+    fn empty_block_json() -> serde_json::Value {
+        json!({
+            "blockhash": "TestBlockHash11111111111111111111111111111",
+            "parentSlot": 0,
+            "transactions": []
+        })
+    }
+
+    fn mock_get_slot(server: &mut Server, slot: u64) -> mockito::Mock {
+        server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::PartialJson(json!({
+                "method": "getSlot"
+            })))
+            .with_status(200)
+            .with_body(
+                json!({
+                    "jsonrpc": "2.0",
+                    "result": slot,
+                    "id": 1
+                })
+                .to_string(),
+            )
+            .create()
+    }
+
+    fn mock_get_slot_error(server: &mut Server) -> mockito::Mock {
+        server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::PartialJson(json!({
+                "method": "getSlot"
+            })))
+            .with_status(200)
+            .with_body(
+                json!({
+                    "jsonrpc": "2.0",
+                    "error": { "code": -32600, "message": "Invalid request" },
+                    "id": 1
+                })
+                .to_string(),
+            )
+            .create()
+    }
+
+    fn mock_get_block_success(server: &mut Server, slot: u64) -> mockito::Mock {
+        server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::PartialJson(json!({
+                "method": "getBlock",
+                "params": [slot]
+            })))
+            .with_status(200)
+            .with_body(
+                json!({
+                    "jsonrpc": "2.0",
+                    "result": empty_block_json(),
+                    "id": 1
+                })
+                .to_string(),
+            )
+            .create()
+    }
+
+    #[tokio::test]
+    async fn try_fill_reconnect_gap_no_gap() {
+        let mut server = Server::new_async().await;
+
+        let _m = mock_get_slot(&mut server, 100);
+
+        let poller = RpcPoller::new(
+            server.url(),
+            UiTransactionEncoding::Json,
+            CommitmentLevel::Finalized,
+        );
+
+        let (tx, _rx) = mpsc::channel(64);
+        let result =
+            try_fill_reconnect_gap(100, &poller, 1000, 10, ProgramType::Escrow, None, &tx).await;
+
+        assert_eq!(result.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn try_fill_reconnect_gap_fills_gap() {
+        let mut server = Server::new_async().await;
+
+        // checkpoint = 100, current_slot = 103 → replay anchor = 99,
+        // fill_slot_range emits slots 100..=103 (boundary slot included).
+        let _m_slot = mock_get_slot(&mut server, 103);
+        let _m0 = mock_get_block_success(&mut server, 100);
+        let _m1 = mock_get_block_success(&mut server, 101);
+        let _m2 = mock_get_block_success(&mut server, 102);
+        let _m3 = mock_get_block_success(&mut server, 103);
+
+        let poller = RpcPoller::new(
+            server.url(),
+            UiTransactionEncoding::Json,
+            CommitmentLevel::Finalized,
+        );
+
+        let (tx, mut rx) = mpsc::channel(64);
+        let result =
+            try_fill_reconnect_gap(100, &poller, 1000, 10, ProgramType::Escrow, None, &tx).await;
+
+        assert_eq!(result.unwrap(), 4);
+        drop(tx);
+
+        let mut slots = vec![];
+        while let Some(msg) = rx.recv().await {
+            if let ProcessorMessage::SlotComplete { slot, .. } = msg {
+                slots.push(slot);
+            }
+        }
+
+        assert_eq!(slots, vec![100, 101, 102, 103]);
+    }
+
+    #[tokio::test]
+    async fn try_fill_reconnect_gap_too_large() {
+        let mut server = Server::new_async().await;
+
+        let _m = mock_get_slot(&mut server, 200);
+
+        let poller = RpcPoller::new(
+            server.url(),
+            UiTransactionEncoding::Json,
+            CommitmentLevel::Finalized,
+        );
+
+        let (tx, _rx) = mpsc::channel(64);
+        let result =
+            try_fill_reconnect_gap(100, &poller, 10, 10, ProgramType::Escrow, None, &tx).await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        let err_str = err.to_string();
+        assert!(
+            err_str.contains("Gap too large"),
+            "Expected 'Gap too large' in error: {}",
+            err_str
+        );
+    }
+
+    #[tokio::test]
+    async fn try_fill_reconnect_gap_rpc_failure() {
+        let mut server = Server::new_async().await;
+
+        let _m = mock_get_slot_error(&mut server);
+
+        let poller = RpcPoller::new(
+            server.url(),
+            UiTransactionEncoding::Json,
+            CommitmentLevel::Finalized,
+        );
+
+        let (tx, _rx) = mpsc::channel(64);
+        let result =
+            try_fill_reconnect_gap(100, &poller, 1000, 10, ProgramType::Escrow, None, &tx).await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        let err_str = err.to_string();
+        assert!(
+            err_str.contains("Failed to get latest slot"),
+            "Expected 'Failed to get latest slot' in error: {}",
+            err_str
+        );
+    }
 }
 
 async fn handle_transaction(

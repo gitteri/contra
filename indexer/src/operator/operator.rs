@@ -1,25 +1,35 @@
 use crate::config::OperatorConfig;
 use crate::error::OperatorError;
+use crate::metrics;
 use crate::operator::{
-    fetcher, processor, sender, DbTransactionWriter, RetryConfig, RpcClientWithRetry,
+    feepayer_monitor, fetcher, processor, reconciliation, sender, DbTransactionWriter, RetryConfig,
+    RpcClientWithRetry,
 };
 use crate::shutdown_utils::shutdown_operator;
 use crate::storage::Storage;
-use crate::ContraIndexerConfig;
+use crate::PrivateChannelIndexerConfig;
+use private_channel_metrics::{HealthState, MetricLabel};
 use solana_sdk::commitment_config::CommitmentConfig;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tracing::info;
+use tracing::{error, info, warn};
 
 pub async fn run(
     storage: Arc<Storage>,
-    common_config: ContraIndexerConfig,
+    common_config: PrivateChannelIndexerConfig,
     config: OperatorConfig,
+    health: Option<Arc<HealthState>>,
 ) -> Result<(), OperatorError> {
-    info!("Starting Contra Operator");
+    info!("Starting PrivateChannel Operator");
     info!("Program: {:?}", common_config.program_type);
     info!("Poll interval: {:?}", config.db_poll_interval);
+    info!("Batch size: {}", config.batch_size);
+    info!("Channel buffer size: {}", config.channel_buffer_size);
+    info!(
+        "Confirmation poll interval: {}ms",
+        config.confirmation_poll_interval_ms
+    );
     info!("Retry max attempts: {}", config.retry_max_attempts);
 
     let cancellation_token = CancellationToken::new();
@@ -52,6 +62,7 @@ pub async fn run(
     let fetcher_storage = storage.clone();
     let fetcher_config = config.clone();
     let fetcher_token = cancellation_token.clone();
+    let fetcher_health = health.clone();
     let fetcher_handle = tokio::spawn(async move {
         if let Err(e) = fetcher::run_fetcher(
             fetcher_storage,
@@ -59,6 +70,7 @@ pub async fn run(
             fetcher_config,
             common_config.program_type,
             fetcher_token,
+            fetcher_health,
         )
         .await
         {
@@ -67,15 +79,21 @@ pub async fn run(
     });
 
     // Start processor task
+    //
+    // storage_tx is cloned into the processor so per-transaction quarantine
+    // updates (ManualReview) flow through the same DbTransactionWriter path
+    // the sender uses for status updates.
     let program_type = common_config.program_type;
     let instance_pda = common_config.escrow_instance_id;
     let processor_storage = storage.clone();
     let processor_rpc = rpc_client.clone();
     let processor_source_rpc = source_rpc_client.clone();
+    let processor_storage_tx = storage_tx.clone();
     let processor_handle = tokio::spawn(async move {
         processor::run_processor(
             processor_rx,
             sender_tx,
+            processor_storage_tx,
             program_type,
             instance_pda,
             processor_storage,
@@ -85,9 +103,14 @@ pub async fn run(
         .await;
     });
 
-    // Start storage writer task (receives updates from sender)
+    // Start storage writer task (receives updates from sender + processor)
     let writer_storage = storage.clone();
-    let storage_writer = DbTransactionWriter::new(writer_storage, storage_rx);
+    let storage_writer = DbTransactionWriter::new(
+        writer_storage,
+        storage_rx,
+        config.alert_webhook_url.clone(),
+        common_config.program_type,
+    );
     let storage_writer_handle = tokio::spawn(async move {
         if let Err(e) = storage_writer.start().await {
             tracing::error!("Storage writer error: {}", e);
@@ -99,15 +122,17 @@ pub async fn run(
     let sender_storage = storage.clone();
     let sender_commitment = config.rpc_commitment;
     let sender_source_rpc = source_rpc_client.clone();
+    let sender_common_config = common_config.clone();
     let sender_handle = tokio::spawn(async move {
         if let Err(e) = sender::run_sender(
-            &common_config,
+            &sender_common_config,
             sender_commitment,
             sender_rx,
             storage_tx,
             sender_token,
             sender_storage,
             config.retry_max_attempts,
+            config.confirmation_poll_interval_ms,
             sender_source_rpc,
         )
         .await
@@ -116,15 +141,110 @@ pub async fn run(
         }
     });
 
-    info!("Operator started, waiting for shutdown signal...");
+    // Start reconciliation task for escrow operators only.
+    // Withdraw operators don't maintain escrow ATA balances, so reconciliation is skipped.
+    let reconciliation_handle = if common_config.program_type == crate::config::ProgramType::Escrow
+    {
+        if let Some(reconciliation_escrow) = common_config.escrow_instance_id {
+            let reconciliation_storage = storage.clone();
+            let reconciliation_config = config.clone();
+            let reconciliation_rpc = source_rpc_client
+                .clone()
+                .unwrap_or_else(|| rpc_client.clone());
+            let reconciliation_token = cancellation_token.clone();
+            tokio::spawn(async move {
+                if let Err(e) = reconciliation::run_reconciliation(
+                    reconciliation_storage,
+                    reconciliation_config,
+                    reconciliation_rpc,
+                    reconciliation_escrow,
+                    reconciliation_token,
+                )
+                .await
+                {
+                    tracing::error!("Reconciliation error: {}", e);
+                }
+            })
+        } else {
+            warn!("Skipping reconciliation: escrow_instance_id is not configured");
+            tokio::spawn(async {})
+        }
+    } else {
+        tokio::spawn(async {})
+    };
 
-    // Wait for shutdown signal
-    tokio::signal::ctrl_c()
-        .await
-        .map_err(|_| OperatorError::ShutdownChannelSend)?;
-    info!("Shutdown signal received, initiating graceful shutdown...");
+    // Start feepayer balance monitor for escrow operators only.
+    // Monitors SOL balance of the feepayer wallet used for ReleaseFunds transactions.
+    let feepayer_monitor_handle =
+        if common_config.program_type == crate::config::ProgramType::Escrow {
+            let feepayer_config = config.clone();
+            let feepayer_rpc = source_rpc_client
+                .clone()
+                .unwrap_or_else(|| rpc_client.clone());
+            let feepayer_program_type = common_config.program_type;
+            let feepayer_token = cancellation_token.clone();
+            tokio::spawn(async move {
+                if let Err(e) = feepayer_monitor::run_feepayer_monitor(
+                    feepayer_config,
+                    feepayer_rpc,
+                    feepayer_program_type,
+                    feepayer_token,
+                )
+                .await
+                {
+                    tracing::error!("Feepayer monitor error: {}", e);
+                }
+            })
+        } else {
+            tokio::spawn(async {})
+        };
 
-    // Graceful shutdown
+    info!("Operator started, waiting for shutdown signal or task exit...");
+
+    // Task supervision.
+    //
+    // We race ctrl-c against each critical task's JoinHandle — whichever
+    // fires first wins — and fall through to the shutdown path either way.
+    // A task exit increments the OPERATOR_TASK_EXIT metric with a task
+    // label so dashboards can tell which one failed without tailing logs.
+    //
+    // Non-critical tasks (reconciliation, feepayer monitor) are not watched
+    // here.
+    //
+    // Handles are polled by mutable reference so ownership stays here and
+    // they can still be moved into `shutdown_operator` below — awaiting an
+    // already-completed JoinHandle is a no-op.
+    let mut fetcher_handle = fetcher_handle;
+    let mut processor_handle = processor_handle;
+    let mut sender_handle = sender_handle;
+    let mut storage_writer_handle = storage_writer_handle;
+    let pt_label = program_type.as_label();
+
+    // `biased;` makes ctrl-c win on concurrent readiness — avoids a
+    // false-positive `critical_exit` when a task ends at the same instant.
+    tokio::select! {
+        biased;
+        result = tokio::signal::ctrl_c() => {
+            result.map_err(|_| OperatorError::ShutdownChannelSend)?;
+            info!("Shutdown signal received, initiating graceful shutdown...");
+        }
+        _ = &mut fetcher_handle => {
+            critical_exit(pt_label, "fetcher");
+        }
+        _ = &mut processor_handle => {
+            critical_exit(pt_label, "processor");
+        }
+        _ = &mut sender_handle => {
+            critical_exit(pt_label, "sender");
+        }
+        _ = &mut storage_writer_handle => {
+            critical_exit(pt_label, "storage_writer");
+        }
+    }
+
+    // Graceful shutdown — runs on both the ctrl-c path and the critical-task-
+    // exit path.  On the exit path, the handle that tripped the select is
+    // already completed; shutdown_operator will wait on the others.
     shutdown_operator(
         cancellation_token,
         storage,
@@ -132,6 +252,8 @@ pub async fn run(
         processor_handle,
         sender_handle,
         storage_writer_handle,
+        reconciliation_handle,
+        feepayer_monitor_handle,
         config.batch_size,
         config.db_poll_interval,
     )
@@ -140,4 +262,20 @@ pub async fn run(
 
     info!("Operator shutdown complete");
     Ok(())
+}
+
+/// Log + metric for a critical task that exited before cancellation.
+///
+/// We don't abort the process here — the caller falls through to
+/// `shutdown_operator` so the remaining tasks get the usual graceful-shutdown
+/// treatment.  The process will exit naturally once `shutdown_operator`
+/// returns, and the supervisor will restart the operator.
+fn critical_exit(program_type_label: &str, task_name: &str) {
+    error!(
+        task = task_name,
+        "Critical operator task exited unexpectedly — triggering shutdown",
+    );
+    metrics::OPERATOR_TASK_EXIT
+        .with_label_values(&[program_type_label, task_name])
+        .inc();
 }

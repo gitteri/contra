@@ -1,5 +1,5 @@
 [package]
-name = "contra-indexer"
+name = "private-channel-indexer"
 version = "0.1.0"
 edition = "2021"
 
@@ -17,6 +17,12 @@ datasource-yellowstone = [
 # Test features
 test-tree = [] # Use smaller tree size for integration tests
 
+# Expose `Storage::Mock` and `mock::MockStorage` outside of `#[cfg(test)]`
+# so integration-test binaries in other crates can inject deterministic
+# storage faults without touching production code paths. Never enable
+# for a release build.
+test-mock-storage = []
+
 [lib]
 path = "src/lib.rs"
 
@@ -33,6 +39,7 @@ solana-sdk = { workspace = true }
 solana-system-interface = { workspace = true }
 spl-token = { workspace = true }
 spl-associated-token-account = { workspace = true }
+spl-memo = { workspace = true }
 sqlx = { workspace = true, features = [
     "runtime-tokio-rustls",
     "postgres",
@@ -47,29 +54,36 @@ futures = { workspace = true }
 async-trait = "0.1"
 borsh = { workspace = true }
 const-crypto = { workspace = true }
-contra-escrow-program-client = { workspace = true }
-once_cell = "1.20"
+private-channel-core = { workspace = true }
+private-channel-escrow-program-client = { workspace = true }
+private-channel-metrics = { workspace = true }
+once_cell = { workspace = true }
 thiserror = { workspace = true }
+uuid = { workspace = true }
+solana-account-decoder-client-types = { workspace = true }
 solana-client = { version = "2.3.10" }
 solana-rpc-client-api = { workspace = true }
 solana-transaction-status = { version = "2.3.10" }
 
 # Yellowstone gRPC (optional - enable with feature: datasource-yellowstone)
+# v12 removed the `convert`/`plugin` features from the proto crate
+# (helpers migrated to yellowstone-grpc-geyser); `tonic` is a direct dep now,
+# not a feature gate. The one conversion helper we used is vendored at
+# indexer/src/indexer/datasource/yellowstone/convert.rs.
 yellowstone-grpc-client = { workspace = true, optional = true }
-yellowstone-grpc-proto = { workspace = true, features = [
-    "plugin",
-    "tonic",
-], optional = true }
+yellowstone-grpc-proto = { workspace = true, optional = true }
 rustls = { workspace = true, optional = true }
 
 solana-keychain = { version = "0.1.0", features = ["all"] }
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 spl-associated-token-account = { workspace = true }
 
 solana-system-interface = { workspace = true }
-contra-withdraw-program-client = { workspace = true }
+private-channel-withdraw-program-client = { workspace = true }
 mockito = "1.7"
+serial_test = "3"
 solana-address = { workspace = true }
 solana-rpc = { workspace = true }
 solana-sdk = { workspace = true }

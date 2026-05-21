@@ -10,7 +10,7 @@ use {
         TransactionStatusMeta, UiTransactionEncoding, UiTransactionStatusMeta,
     },
     solana_transaction_status_client_types::InnerInstructions,
-    tracing::info,
+    tracing::debug,
 };
 
 pub fn get_stored_transaction(
@@ -19,7 +19,7 @@ pub fn get_stored_transaction(
     block_time: UnixTimestamp,
     processed: &ProcessedTransaction,
 ) -> StoredTransaction {
-    info!("Stored transaction: {:?}", processed);
+    debug!("Stored transaction: {:?}", processed);
 
     let meta = match processed {
         ProcessedTransaction::Executed(executed) => {
@@ -95,8 +95,55 @@ pub fn get_stored_transaction(
 pub fn encode_transaction_data(data: &[u8], encoding: UiTransactionEncoding) -> String {
     match encoding {
         UiTransactionEncoding::Base58 => bs58::encode(data).into_string(),
-        UiTransactionEncoding::Base64 | UiTransactionEncoding::Binary => STANDARD.encode(data),
-        UiTransactionEncoding::Json => STANDARD.encode(data),
-        UiTransactionEncoding::JsonParsed => STANDARD.encode(data),
+        _ => STANDARD.encode(data),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_encode_base58() {
+        let data = b"hello";
+        let encoded = encode_transaction_data(data, UiTransactionEncoding::Base58);
+        assert_eq!(encoded, bs58::encode(b"hello").into_string());
+        // Verify roundtrip
+        let decoded = bs58::decode(&encoded).into_vec().unwrap();
+        assert_eq!(decoded, b"hello");
+    }
+
+    #[test]
+    fn test_encode_base64() {
+        let data = b"hello";
+        let encoded = encode_transaction_data(data, UiTransactionEncoding::Base64);
+        assert_eq!(encoded, STANDARD.encode(b"hello"));
+        // Verify roundtrip
+        let decoded = STANDARD.decode(&encoded).unwrap();
+        assert_eq!(decoded, b"hello");
+    }
+
+    #[test]
+    fn test_encode_binary_same_as_base64() {
+        let data = b"test data";
+        let base64 = encode_transaction_data(data, UiTransactionEncoding::Base64);
+        let binary = encode_transaction_data(data, UiTransactionEncoding::Binary);
+        assert_eq!(base64, binary);
+    }
+
+    #[test]
+    fn test_encode_json_uses_base64() {
+        let data = b"json data";
+        let json = encode_transaction_data(data, UiTransactionEncoding::Json);
+        let base64 = encode_transaction_data(data, UiTransactionEncoding::Base64);
+        assert_eq!(json, base64);
+    }
+
+    #[test]
+    fn test_encode_json_parsed_uses_base64() {
+        let data = b"parsed data";
+        let parsed = encode_transaction_data(data, UiTransactionEncoding::JsonParsed);
+        let base64 = encode_transaction_data(data, UiTransactionEncoding::Base64);
+        assert_eq!(parsed, base64);
     }
 }

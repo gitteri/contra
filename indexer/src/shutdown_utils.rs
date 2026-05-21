@@ -288,6 +288,8 @@ pub async fn shutdown_operator(
     processor_handle: tokio::task::JoinHandle<()>,
     sender_handle: tokio::task::JoinHandle<()>,
     storage_writer_handle: tokio::task::JoinHandle<()>,
+    reconciliation_handle: tokio::task::JoinHandle<()>,
+    feepayer_monitor_handle: tokio::task::JoinHandle<()>,
     batch_size: u16,
     db_poll_interval: Duration,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -304,6 +306,8 @@ pub async fn shutdown_operator(
             processor_handle,
             sender_handle,
             storage_writer_handle,
+            reconciliation_handle,
+            feepayer_monitor_handle,
             batch_size,
             db_poll_interval,
             &config,
@@ -354,6 +358,8 @@ async fn perform_operator_shutdown_stages(
     processor_handle: tokio::task::JoinHandle<()>,
     sender_handle: tokio::task::JoinHandle<()>,
     storage_writer_handle: tokio::task::JoinHandle<()>,
+    reconciliation_handle: tokio::task::JoinHandle<()>,
+    feepayer_monitor_handle: tokio::task::JoinHandle<()>,
     batch_size: u16,
     db_poll_interval: Duration,
     config: &ShutdownConfig,
@@ -433,9 +439,46 @@ async fn perform_operator_shutdown_stages(
         }
     }
 
-    // Stage 6: Add buffer time before storage close for safety
+    // Stage 6: Drain reconciliation and feepayer monitor loops
+    info!("Stage 6: Waiting for reconciliation loop to drain...");
+    let reconciliation_result = tokio::time::timeout(
+        Duration::from_secs(config.storage_writer_drain_timeout_secs),
+        reconciliation_handle,
+    )
+    .await;
+
+    match reconciliation_result {
+        Ok(Ok(_)) => info!("Reconciliation loop drained successfully"),
+        Ok(Err(e)) => warn!("Reconciliation loop error: {:?}", e),
+        Err(_) => {
+            warn!(
+                "Reconciliation loop drain timed out after {}s",
+                config.storage_writer_drain_timeout_secs
+            );
+        }
+    }
+
+    info!("Stage 6b: Waiting for feepayer monitor to drain...");
+    let feepayer_result = tokio::time::timeout(
+        Duration::from_secs(config.storage_writer_drain_timeout_secs),
+        feepayer_monitor_handle,
+    )
+    .await;
+
+    match feepayer_result {
+        Ok(Ok(_)) => info!("Feepayer monitor drained successfully"),
+        Ok(Err(e)) => warn!("Feepayer monitor error: {:?}", e),
+        Err(_) => {
+            warn!(
+                "Feepayer monitor drain timed out after {}s",
+                config.storage_writer_drain_timeout_secs
+            );
+        }
+    }
+
+    // Stage 7: Add buffer time before storage close for safety
     info!(
-        "Stage 6: Waiting {}s buffer time before storage close...",
+        "Stage 7: Waiting {}s buffer time before storage close...",
         config.shutdown_buffer_time_secs
     );
     tokio::time::sleep(Duration::from_secs(config.shutdown_buffer_time_secs)).await;
@@ -501,8 +544,6 @@ pub async fn cleanup_after_backfill(
     Ok(())
 }
 
-/// Wait for a task to complete with periodic progress logging
-/// Returns success if task completes within timeout, error otherwise
 async fn wait_with_progress<T>(
     mut handle: tokio::task::JoinHandle<T>,
     timeout: Duration,
@@ -538,5 +579,106 @@ async fn wait_with_progress<T>(
                 info!("Still waiting for {} ({} seconds elapsed)...", task_name, elapsed_secs);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::common::storage::mock::MockStorage;
+
+    async fn wait_with_progress_test<T>(
+        handle: tokio::task::JoinHandle<T>,
+        timeout: Duration,
+        task_name: &str,
+    ) -> Result<(), ()> {
+        wait_with_progress(handle, timeout, task_name).await
+    }
+
+    // ====================================================================
+    // ShutdownConfig::default()
+    // ====================================================================
+
+    #[test]
+    fn shutdown_config_default_values() {
+        let config = ShutdownConfig::default();
+        assert_eq!(config.total_timeout_secs, SHUTDOWN_TOTAL_TIMEOUT_SECS);
+        assert_eq!(
+            config.datasource_shutdown_timeout_secs,
+            SHUTDOWN_DATASOURCE_TIMEOUT_SECS
+        );
+        assert_eq!(
+            config.datasource_completion_timeout_secs,
+            SHUTDOWN_DATASOURCE_COMPLETION_TIMEOUT_SECS
+        );
+        assert_eq!(
+            config.processor_drain_timeout_secs,
+            SHUTDOWN_PROCESSOR_DRAIN_TIMEOUT_SECS
+        );
+        assert_eq!(
+            config.checkpoint_drain_timeout_secs,
+            SHUTDOWN_CHECKPOINT_DRAIN_TIMEOUT_SECS
+        );
+        assert_eq!(
+            config.sender_base_timeout_secs,
+            SHUTDOWN_SENDER_BASE_TIMEOUT_SECS
+        );
+        assert_eq!(
+            config.sender_time_per_tx_secs,
+            SHUTDOWN_SENDER_TIME_PER_TX_SECS
+        );
+        assert_eq!(
+            config.storage_writer_drain_timeout_secs,
+            SHUTDOWN_STORAGE_WRITER_DRAIN_TIMEOUT_SECS
+        );
+        assert_eq!(
+            config.storage_close_timeout_secs,
+            SHUTDOWN_STORAGE_CLOSE_TIMEOUT_SECS
+        );
+        assert_eq!(
+            config.shutdown_buffer_time_secs,
+            SHUTDOWN_SHUTDOWN_BUFFER_TIME_SECS
+        );
+        assert_eq!(config.force_exit_on_timeout, SHUTDOWN_FORCE_EXIT_ON_TIMEOUT);
+    }
+
+    // ====================================================================
+    // cleanup_after_backfill
+    // ====================================================================
+
+    #[tokio::test]
+    async fn cleanup_after_backfill_ok() {
+        let mock = MockStorage::new();
+        let storage = Arc::new(Storage::Mock(mock));
+        let (checkpoint_tx, checkpoint_rx) = mpsc::channel::<CheckpointUpdate>(10);
+
+        // Start a simple checkpoint writer that just drains
+        let checkpoint_handle = tokio::spawn(async move {
+            let mut rx = checkpoint_rx;
+            while rx.recv().await.is_some() {}
+        });
+
+        let result = cleanup_after_backfill(checkpoint_handle, checkpoint_tx, storage).await;
+        assert!(result.is_ok());
+    }
+
+    // ====================================================================
+    // wait_with_progress (via test wrapper)
+    // ====================================================================
+
+    #[tokio::test]
+    async fn wait_with_progress_immediate_task_ok() {
+        let handle = tokio::spawn(async { 42 });
+        let result = wait_with_progress_test(handle, Duration::from_secs(5), "test-task").await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn wait_with_progress_timeout_returns_err() {
+        let handle = tokio::spawn(async {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        });
+        let result = wait_with_progress_test(handle, Duration::from_millis(50), "slow-task").await;
+        assert!(result.is_err());
     }
 }

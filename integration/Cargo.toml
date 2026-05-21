@@ -1,36 +1,220 @@
 [package]
-name = "contra-integration"
+name = "private-channel-integration"
 version = "0.1.0"
 edition = "2021"
 
 [[test]]
-name = "contra_integration"
-path = "tests/contra/integration.rs"
+name = "private_channel_integration"
+path = "tests/private-channel/integration.rs"
 
 [[test]]
 name = "indexer_integration"
 path = "tests/indexer/integration.rs"
 
+[[test]]
+name = "reconciliation_integration"
+path = "tests/indexer/reconciliation.rs"
+
+[[test]]
+name = "mint_idempotency_integration"
+path = "tests/indexer/mint_idempotency.rs"
+
+[[test]]
+name = "gap_detection_integration"
+path = "tests/indexer/gap_detection.rs"
+
+[[test]]
+name = "truncate_integration"
+path = "tests/private-channel/truncate.rs"
+
+[[test]]
+name = "operator_lifecycle_integration"
+path = "tests/indexer/operator_lifecycle.rs"
+
+[[test]]
+name = "resync_integration"
+path = "tests/indexer/resync.rs"
+
+[[test]]
+name = "reconciliation_e2e_test"
+path = "tests/indexer/reconciliation_e2e.rs"
+
+[[test]]
+name = "pausable_mint_integration"
+path = "tests/indexer/pausable_mint.rs"
+
+[[test]]
+name = "permanent_delegate_mint_integration"
+path = "tests/indexer/permanent_delegate_mint.rs"
+
+[[test]]
+name = "mock_rpc_retry"
+path = "tests/indexer/mock_rpc_retry.rs"
+
+[[test]]
+name = "checkpoint_partial_flush"
+path = "tests/indexer/checkpoint_partial_flush.rs"
+
+[[test]]
+name = "remint_recovery"
+path = "tests/indexer/remint_recovery.rs"
+
+[[test]]
+name = "test_rpc_http_malformed"
+path = "tests/private-channel/rpc/test_rpc_http_malformed.rs"
+
+[[test]]
+name = "test_simulate_transaction_guards"
+path = "tests/private-channel/rpc/test_simulate_transaction_guards.rs"
+
+[[test]]
+name = "test_health_endpoint_standalone"
+path = "tests/private-channel/rpc/test_health_endpoint_standalone.rs"
+
+[[test]]
+name = "bootstrap_validation"
+path = "tests/indexer/bootstrap_validation.rs"
+
+[[test]]
+name = "withdrawal_null_nonce"
+path = "tests/indexer/withdrawal_null_nonce.rs"
+
+[[test]]
+name = "yellowstone_wiring"
+path = "tests/indexer/yellowstone_wiring.rs"
+
+[[test]]
+name = "malformed_yellowstone_update"
+path = "tests/indexer/malformed_yellowstone_update.rs"
+
+[[test]]
+name = "yellowstone_reconnect_gap"
+path = "tests/indexer/yellowstone_reconnect_gap.rs"
+
+# Yellowstone inner_instructions + unknown-discriminator arms.
+[[test]]
+name = "yellowstone_inner_and_unknown"
+path = "tests/indexer/yellowstone_inner_and_unknown.rs"
+
+# OperatorMockHarness sanity test.
+# Validates the `start_*_operator_with_mocks` helpers drive the operator end-
+# to-end through a scripted `MockRpcServer` + `Storage::Mock`. Fault-injection
+# tests are built on top of this harness.
+[[test]]
+name = "harness_sanity"
+path = "tests/indexer/harness_sanity.rs"
+
+# RPC-error + storage-failure fault-injection tests.
+[[test]]
+name = "sender_mint_idempotency"
+path = "tests/indexer/sender_mint_idempotency.rs"
+
+[[test]]
+name = "sender_mint_validator_encodings"
+path = "tests/indexer/sender_mint_validator_encodings.rs"
+
+[[test]]
+name = "sender_mint_signature_failures"
+path = "tests/indexer/sender_mint_signature_failures.rs"
+
+[[test]]
+name = "sender_poll_rpc_error"
+path = "tests/indexer/sender_poll_rpc_error.rs"
+
+[[test]]
+name = "sender_sign_and_send_error"
+path = "tests/indexer/sender_sign_and_send_error.rs"
+
+[[test]]
+name = "sender_max_retries"
+path = "tests/indexer/sender_max_retries.rs"
+
+[[test]]
+name = "sender_onchain_error_arms"
+path = "tests/indexer/sender_onchain_error_arms.rs"
+
+[[test]]
+name = "jit_mint_helper"
+path = "tests/indexer/jit_mint_helper.rs"
+
+[[test]]
+name = "storage_update_failure"
+path = "tests/indexer/storage_update_failure.rs"
+
+[[test]]
+name = "processor_quarantine"
+path = "tests/indexer/processor_quarantine.rs"
+
+[[test]]
+name = "state_recovery_malformed"
+path = "tests/indexer/state_recovery_malformed.rs"
+
+[[test]]
+name = "remint_flow"
+path = "tests/indexer/remint_flow.rs"
+
+[[test]]
+name = "mint_builder_validation"
+path = "tests/indexer/mint_builder_validation.rs"
+
+# `run_sender` channel-close shutdown arm.
+[[test]]
+name = "sender_channel_close"
+path = "tests/indexer/sender_channel_close.rs"
+
+# `run_sender` cancellation-drain arm.
+[[test]]
+name = "sender_cancellation_drain"
+path = "tests/indexer/sender_cancellation_drain.rs"
+
+# sequencer zero-deadline drain branch.
+[[test]]
+name = "test_sequencer_zero_deadline"
+path = "tests/private-channel/test_sequencer_zero_deadline.rs"
+
+# get_signatures_for_address data-corruption guards.
+[[test]]
+name = "test_signatures_corruption_guard"
+path = "tests/private-channel/test_signatures_corruption_guard.rs"
+
+# run_node config-validation guards (blocktime / max_blockhashes).
+[[test]]
+name = "test_node_config_validation"
+path = "tests/private-channel/test_node_config_validation.rs"
+
+# Redis-backend warm-cache + read-path coverage test. Runs independently of
+# private_channel_integration so it still contributes coverage even when the broader
+# suite is flaky.
+[[test]]
+name = "test_redis_cache_path"
+path = "tests/private-channel/rpc/test_redis_cache_path.rs"
+
 [features]
-test-tree = ["contra-indexer/test-tree"]
+test-tree = ["private-channel-indexer/test-tree"]
 
 [dependencies]
 anyhow = "1.0.100"
 base64 = { workspace = true }
+bs58 = { workspace = true }
+bincode = { workspace = true }
 chrono = { workspace = true }
-contra-core = { path = "../core" }
-contra-escrow-program-client = { path = "../contra-escrow-program/clients/rust" }
-contra-indexer = { path = "../indexer", features = [
+private-channel-core = { path = "../core" }
+private-channel-escrow-program-client = { path = "../private-channel-escrow-program/clients/rust" }
+private-channel-indexer = { path = "../indexer", features = [
     "datasource-rpc",
     "datasource-yellowstone",
+    "test-mock-storage",
 ] }
-contra-withdraw-program-client = { path = "../contra-withdraw-program/clients/rust" }
+private-channel-withdraw-program-client = { path = "../private-channel-withdraw-program/clients/rust" }
+dvp-swap-program-client = { path = "../dvp-swap-program/clients/rust" }
 http-body-util = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }
+jsonrpsee = { workspace = true }
 serde_json = { workspace = true }
 solana-account-decoder-client-types = "2.3.10"
 solana-client = { version = "2.3.10" }
+solana-keychain = { version = "0.1.0", features = ["all"] }
 solana-pubkey = "2.4.0"
 solana-sdk = { workspace = true }
 solana-sdk-ids = { workspace = true }
@@ -38,12 +222,27 @@ solana-system-interface = { workspace = true }
 solana-test-validator = { workspace = true }
 solana-transaction-status = { workspace = true }
 spl-associated-token-account = { workspace = true }
+spl-memo = { workspace = true }
 spl-token = { workspace = true }
 spl-token-2022 = { workspace = true }
 sqlx = { workspace = true }
+mockito = "1.7"
+redis = { workspace = true }
 testcontainers = { workspace = true }
 testcontainers-modules = { workspace = true }
-test_utils = { path = "../test_utils" }
+test_utils = { path = "../test_utils", features = [
+    "test-mock-yellowstone",
+    "test-mock-storage",
+] }
+# yellowstone-grpc-proto is pulled in by `test-mock-yellowstone` on `test_utils`,
+# but we also need direct access to its `SubscribeUpdate` / `CompiledInstruction`
+# proto types in the test bodies to enqueue scripted updates into the mock.
+yellowstone-grpc-proto = { workspace = true, features = ["tonic"] }
+# async-trait + tokio-util come in transitively via private-channel-indexer but are used
+# directly by the Yellowstone-source driver tests.
+async-trait = "0.1"
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+uuid = { workspace = true }

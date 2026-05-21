@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::Type;
+use uuid::Uuid;
 
 /// Type of a transaction
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -28,6 +29,17 @@ pub enum TransactionStatus {
     Processing,
     Completed,
     Failed,
+    // Withdrawal failed permanently but burned PrivateChannel tokens were reminted back to user
+    #[sqlx(rename = "failed_reminted")]
+    FailedReminted,
+    // Remint attempted but could not confirm — requires manual investigation
+    #[sqlx(rename = "manual_review")]
+    ManualReview,
+    // Withdrawal failed permanently; remint is queued and will be attempted after
+    // the finality window. Transitions to FailedReminted, ManualReview, or
+    // Completed (if original withdrawal actually landed).
+    #[sqlx(rename = "pending_remint")]
+    PendingRemint,
 }
 
 /// DbTransaction domain model
@@ -36,6 +48,7 @@ pub enum TransactionStatus {
 pub struct DbTransaction {
     pub id: i64,
     pub signature: String,
+    pub trace_id: String,
     pub slot: i64,
     pub initiator: String,
     pub recipient: String,
@@ -48,9 +61,31 @@ pub struct DbTransaction {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub processed_at: Option<DateTime<Utc>>,
-    // If this is a deposit from Solana to Contra, this will represent the Contra signature and
-    // if this is a withdrawal from Contra to Solana, this will represent the Solana signature
+    // If this is a deposit from Solana to PrivateChannel, this will represent the PrivateChannel signature and
+    // if this is a withdrawal from PrivateChannel to Solana, this will represent the Solana signature
     pub counterpart_signature: Option<String>,
+    /// Withdrawal signatures sent to Solana, stored when status transitions to
+    /// PendingRemint. Used on restart to verify whether the original withdrawal
+    /// finalized before attempting to remint.
+    pub remint_signatures: Option<Vec<String>>,
+    /// UTC timestamp of when the finality check deadline expires for PendingRemint transactions.                                                                           
+    /// Set when transitioning to PendingRemint, used to restore the exact wait time on restart.                                                                            
+    pub pending_remint_deadline_at: Option<DateTime<Utc>>,
+}
+
+/// Per-mint balance aggregate used during startup reconciliation.
+/// Returned by the reconciliation storage query.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct MintDbBalance {
+    pub mint_address: String,
+    pub token_program: String,
+    /// Sum of amounts for all indexed deposits (any status).
+    /// Deposits increase the on-chain ATA balance the moment they are observed,
+    /// regardless of whether the operator has completed the corresponding private_channel mint.
+    pub total_deposits: i64,
+    /// Sum of amounts for completed withdrawals only.
+    /// Only a completed `release_funds` call actually reduces the on-chain ATA balance.
+    pub total_withdrawals: i64,
 }
 
 /// Mint metadata stored
@@ -60,6 +95,12 @@ pub struct DbMint {
     pub decimals: i16,
     pub token_program: String,
     pub created_at: DateTime<Utc>,
+    /// `None` = the on-chain PausableConfig extension state is unknown to us yet.
+    /// Resolved lazily by the operator's MintCache on first RPC fetch.
+    pub is_pausable: Option<bool>,
+    /// `None` = the on-chain PermanentDelegate extension state is unknown to us yet.
+    /// Resolved lazily alongside `is_pausable` in a single RPC fetch.
+    pub has_permanent_delegate: Option<bool>,
 }
 
 impl DbMint {
@@ -69,6 +110,8 @@ impl DbMint {
             decimals,
             token_program,
             created_at: Utc::now(),
+            is_pausable: None,
+            has_permanent_delegate: None,
         }
     }
 }
@@ -83,6 +126,7 @@ pub struct DbTransactionBuilder {
     recipient: Option<String>,
     memo: Option<String>,
     transaction_type: Option<TransactionType>,
+    trace_id: Option<String>,
 }
 
 impl DbTransactionBuilder {
@@ -96,6 +140,7 @@ impl DbTransactionBuilder {
             recipient: None,
             memo: None,
             transaction_type: None,
+            trace_id: None,
         }
     }
 
@@ -119,11 +164,17 @@ impl DbTransactionBuilder {
         self
     }
 
+    pub fn trace_id(mut self, trace_id: String) -> Self {
+        self.trace_id = Some(trace_id);
+        self
+    }
+
     pub fn build(self) -> DbTransaction {
         let now = Utc::now();
         DbTransaction {
             id: 0,
             signature: self.signature,
+            trace_id: self.trace_id.unwrap_or_else(|| Uuid::new_v4().to_string()),
             slot: self.slot,
             initiator: self.initiator.expect("initiator is required"),
             recipient: self.recipient.expect("recipient is required"),
@@ -137,6 +188,8 @@ impl DbTransactionBuilder {
             updated_at: now,
             processed_at: None,
             counterpart_signature: None,
+            remint_signatures: None,
+            pending_remint_deadline_at: None,
         }
     }
 }

@@ -16,6 +16,7 @@ use spl_token::{
 
 use super::transactions::send_and_confirm_instructions;
 
+#[allow(dead_code)]
 pub async fn generate_mint(
     client: &RpcClient,
     payer: &Keypair,
@@ -54,6 +55,7 @@ pub async fn generate_mint(
     Ok(mint.pubkey())
 }
 
+#[allow(dead_code)]
 pub async fn mint_to_owner(
     client: &RpcClient,
     payer: &Keypair,
@@ -93,8 +95,7 @@ pub async fn mint_to_owner(
     Ok(ata)
 }
 
-#[allow(unused)]
-/// Get token account balance for a specific user and mint
+#[allow(dead_code)]
 pub async fn get_token_balance(
     client: &RpcClient,
     owner: &Pubkey,

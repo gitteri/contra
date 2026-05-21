@@ -1,3 +1,4 @@
+use crate::metrics;
 use crate::{
     channel_utils::send_guaranteed,
     config::{BackfillConfig, ProgramType},
@@ -11,6 +12,8 @@ use crate::{
     },
     storage::Storage,
 };
+use private_channel_metrics::MetricLabel;
+use solana_sdk::pubkey::Pubkey;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{error, info, warn};
@@ -18,13 +21,185 @@ use tracing::{error, info, warn};
 const BACKFILL_RETRY_DELAY_MS: u64 = 5000;
 const BACKFILL_MAX_RETRIES: usize = 3;
 
+/// Validate gap between current slot and a reference slot.
+/// Returns Ok(None) if no gap, Ok(Some(gap)) if valid gap, Err if gap too large.
+pub fn validate_gap(
+    current_slot: u64,
+    last_checkpoint: u64,
+    max_gap_slots: u64,
+) -> Result<Option<u64>, BackfillError> {
+    if current_slot <= last_checkpoint {
+        return Ok(None);
+    }
+
+    let gap = current_slot - last_checkpoint;
+
+    if gap > max_gap_slots {
+        return Err(BackfillError::GapTooLarge {
+            gap,
+            max_gap: max_gap_slots,
+        });
+    }
+
+    Ok(Some(gap))
+}
+
+fn calculate_batches(from_slot: u64, to_slot: u64, batch_size: usize) -> Vec<Vec<u64>> {
+    let mut batches = vec![];
+    let mut next_slot = from_slot + 1;
+
+    while next_slot <= to_slot {
+        let batch_end = std::cmp::min(next_slot + batch_size as u64, to_slot + 1);
+        let batch: Vec<u64> = (next_slot..batch_end).collect();
+        batches.push(batch);
+        next_slot = batch_end;
+    }
+
+    batches
+}
+
+async fn fetch_blocks_with_retry(
+    rpc_poller: &RpcPoller,
+    slots: &[u64],
+    retry_count: usize,
+) -> Result<Vec<(u64, Result<Option<RpcBlock>, BackfillError>)>, IndexerError> {
+    if retry_count > 0 {
+        tokio::time::sleep(Duration::from_millis(
+            BACKFILL_RETRY_DELAY_MS * retry_count as u64,
+        ))
+        .await;
+    }
+
+    Ok(rpc_poller
+        .get_blocks_batch(slots.to_vec())
+        .await
+        .into_iter()
+        .map(|(slot, result)| {
+            (
+                slot,
+                result.map_err(|e| BackfillError::SlotFetchFailed { slot, source: e }),
+            )
+        })
+        .collect::<Vec<(u64, Result<Option<RpcBlock>, BackfillError>)>>())
+}
+
+/// Fill a range of slots by fetching blocks via RPC and sending parsed instructions.
+/// Shared by startup backfill and reconnect gap-fill.
+/// Returns the number of processed slots.
+pub async fn fill_slot_range(
+    rpc_poller: &RpcPoller,
+    from_slot: u64,
+    to_slot: u64,
+    batch_size: usize,
+    program_type: ProgramType,
+    escrow_instance_id: Option<Pubkey>,
+    instruction_tx: &InstructionSender,
+) -> Result<u64, IndexerError> {
+    let mut processed_count: u64 = 0;
+    let gap = to_slot - from_slot;
+
+    metrics::INDEXER_BACKFILL_SLOTS_REMAINING
+        .with_label_values(&[program_type.as_label()])
+        .set(gap as f64);
+
+    let all_batches = calculate_batches(from_slot, to_slot, batch_size);
+
+    for slots in all_batches {
+        let mut retry_count = 0;
+        let blocks = loop {
+            match fetch_blocks_with_retry(rpc_poller, &slots, retry_count).await {
+                Ok(blocks) => break blocks,
+                Err(e) => {
+                    retry_count += 1;
+                    if retry_count >= BACKFILL_MAX_RETRIES {
+                        error!(
+                            "Failed to fetch blocks after {} retries: {}",
+                            BACKFILL_MAX_RETRIES, e
+                        );
+                        return Err(e);
+                    }
+                    warn!(
+                        "Retry {}/{} after error: {}",
+                        retry_count, BACKFILL_MAX_RETRIES, e
+                    );
+                    tokio::time::sleep(Duration::from_millis(
+                        BACKFILL_RETRY_DELAY_MS * retry_count as u64,
+                    ))
+                    .await;
+                }
+            }
+        };
+
+        for (slot, block_result) in blocks {
+            match block_result {
+                Ok(Some(block)) => {
+                    let instructions_with_meta = decoder::parse_block(
+                        &block,
+                        slot,
+                        program_type,
+                        escrow_instance_id.as_ref(),
+                    );
+
+                    for instruction_meta in instructions_with_meta {
+                        send_guaranteed(
+                            instruction_tx,
+                            ProcessorMessage::Instruction(instruction_meta),
+                            "instruction (backfill)",
+                        )
+                        .await
+                        .map_err(BackfillError::ChannelSend)?;
+                    }
+                    processed_count += 1;
+                }
+                Ok(None) => {
+                    processed_count += 1;
+                }
+                Err(e) => {
+                    warn!("Error fetching block {}: {}", slot, e);
+                    return Err(DataSourceError::from(e).into());
+                }
+            }
+
+            send_guaranteed(
+                instruction_tx,
+                ProcessorMessage::SlotComplete { slot, program_type },
+                "SlotComplete marker (backfill)",
+            )
+            .await
+            .map_err(|e| DataSourceError::from(BackfillError::ChannelSend(e)))?;
+        }
+
+        metrics::INDEXER_BACKFILL_SLOTS_REMAINING
+            .with_label_values(&[program_type.as_label()])
+            .set((gap - processed_count) as f64);
+
+        if processed_count.is_multiple_of(1000) {
+            let progress = ((processed_count as f64 / gap as f64) * 100.0) as u32;
+            info!(
+                "Backfill progress for {:?}: {}/{} slots ({}%)",
+                program_type, processed_count, gap, progress
+            );
+        }
+    }
+
+    metrics::INDEXER_BACKFILL_SLOTS_REMAINING
+        .with_label_values(&[program_type.as_label()])
+        .set(0.0);
+
+    info!(
+        "Backfill complete for {:?}. Processed {} slots from {} to {}",
+        program_type, processed_count, from_slot, to_slot
+    );
+    Ok(processed_count)
+}
+
 /// Backfill service for recovering missed slots on startup
 pub struct BackfillService {
     storage: Arc<Storage>,
     rpc_poller: Arc<RpcPoller>,
     program_type: ProgramType,
     config: BackfillConfig,
-    escrow_instance_id: Option<solana_sdk::pubkey::Pubkey>,
+    escrow_instance_id: Option<Pubkey>,
 }
 
 impl BackfillService {
@@ -33,7 +208,7 @@ impl BackfillService {
         rpc_poller: Arc<RpcPoller>,
         program_type: ProgramType,
         config: BackfillConfig,
-        escrow_instance_id: Option<solana_sdk::pubkey::Pubkey>,
+        escrow_instance_id: Option<Pubkey>,
     ) -> Self {
         Self {
             storage,
@@ -42,45 +217,6 @@ impl BackfillService {
             config,
             escrow_instance_id,
         }
-    }
-
-    /// Validate gap between current slot and checkpoint
-    /// Returns Ok(None) if no gap, Ok(Some(gap)) if valid gap, Err if gap too large
-    fn validate_gap(
-        current_slot: u64,
-        last_checkpoint: u64,
-        max_gap_slots: u64,
-    ) -> Result<Option<u64>, BackfillError> {
-        if current_slot <= last_checkpoint {
-            return Ok(None);
-        }
-
-        let gap = current_slot - last_checkpoint;
-
-        if gap > max_gap_slots {
-            return Err(BackfillError::GapTooLarge {
-                gap,
-                max_gap: max_gap_slots,
-            });
-        }
-
-        Ok(Some(gap))
-    }
-
-    /// Calculate slot batches for backfill processing
-    /// Returns vector of slot ranges to process in batches
-    fn calculate_batches(from_slot: u64, to_slot: u64, batch_size: usize) -> Vec<Vec<u64>> {
-        let mut batches = vec![];
-        let mut next_slot = from_slot + 1;
-
-        while next_slot <= to_slot {
-            let batch_end = std::cmp::min(next_slot + batch_size as u64, to_slot + 1);
-            let batch: Vec<u64> = (next_slot..batch_end).collect();
-            batches.push(batch);
-            next_slot = batch_end;
-        }
-
-        batches
     }
 
     /// Run the backfill process
@@ -120,14 +256,13 @@ impl BackfillService {
             last_checkpoint
         };
 
-        let current_slot = self.rpc_poller.get_latest_slot().await.map_err(|e| {
-            BackfillError::SlotFetchFailed {
-                slot: 0, // Latest slot fetch failed
-                source: e,
-            }
-        })?;
+        let current_slot = self
+            .rpc_poller
+            .get_latest_slot()
+            .await
+            .map_err(|e| BackfillError::SlotFetchFailed { slot: 0, source: e })?;
 
-        match Self::validate_gap(current_slot, from_slot, self.config.max_gap_slots)
+        match validate_gap(current_slot, from_slot, self.config.max_gap_slots)
             .map_err(DataSourceError::from)?
         {
             None => {
@@ -145,136 +280,19 @@ impl BackfillService {
             }
         }
 
-        self.backfill_gap(from_slot, current_slot, instruction_tx)
-            .await?;
+        fill_slot_range(
+            &self.rpc_poller,
+            from_slot,
+            current_slot,
+            self.config.batch_size,
+            self.program_type,
+            self.escrow_instance_id,
+            &instruction_tx,
+        )
+        .await?;
 
         info!("Backfill complete for {:?}", self.program_type);
         Ok(())
-    }
-
-    /// Backfill gap using RPC polling
-    async fn backfill_gap(
-        &self,
-        from_slot: u64,
-        to_slot: u64,
-        instruction_tx: InstructionSender,
-    ) -> Result<(), IndexerError> {
-        let mut processed_count = 0;
-        let gap = to_slot - from_slot;
-
-        let all_batches = Self::calculate_batches(from_slot, to_slot, self.config.batch_size);
-
-        for slots in all_batches {
-            let mut retry_count = 0;
-            let blocks = loop {
-                match self.fetch_blocks_with_retry(&slots, retry_count).await {
-                    Ok(blocks) => break blocks,
-                    Err(e) => {
-                        retry_count += 1;
-                        if retry_count >= BACKFILL_MAX_RETRIES {
-                            error!(
-                                "Failed to fetch blocks after {} retries: {}",
-                                BACKFILL_MAX_RETRIES, e
-                            );
-                            return Err(e);
-                        }
-                        warn!(
-                            "Retry {}/{} after error: {}",
-                            retry_count, BACKFILL_MAX_RETRIES, e
-                        );
-                        tokio::time::sleep(Duration::from_millis(
-                            BACKFILL_RETRY_DELAY_MS * retry_count as u64,
-                        ))
-                        .await;
-                    }
-                }
-            };
-
-            for (slot, block_result) in blocks {
-                match block_result {
-                    Ok(Some(block)) => {
-                        let instructions_with_meta = decoder::parse_block(
-                            &block,
-                            slot,
-                            self.program_type,
-                            self.escrow_instance_id.as_ref(),
-                        );
-
-                        for instruction_meta in instructions_with_meta {
-                            send_guaranteed(
-                                &instruction_tx,
-                                ProcessorMessage::Instruction(instruction_meta),
-                                "instruction (backfill)",
-                            )
-                            .await
-                            .map_err(BackfillError::ChannelSend)?;
-                        }
-                        processed_count += 1;
-                    }
-                    Ok(None) => {
-                        // Skipped slot (valid)
-                        processed_count += 1;
-                    }
-                    Err(e) => {
-                        warn!("Error fetching block {}: {}", slot, e);
-                        return Err(DataSourceError::from(e).into());
-                    }
-                }
-
-                // Send SlotComplete marker after processing each slot
-                send_guaranteed(
-                    &instruction_tx,
-                    ProcessorMessage::SlotComplete {
-                        slot,
-                        program_type: self.program_type,
-                    },
-                    "SlotComplete marker (backfill)",
-                )
-                .await
-                .map_err(|e| DataSourceError::from(BackfillError::ChannelSend(e)))?;
-            }
-
-            if processed_count % 1000 == 0 {
-                let progress = ((processed_count as f64 / gap as f64) * 100.0) as u32;
-                info!(
-                    "Backfill progress for {:?}: {}/{} slots ({}%)",
-                    self.program_type, processed_count, gap, progress
-                );
-            }
-        }
-
-        info!(
-            "Backfill complete for {:?}. Processed {} slots from {} to {}",
-            self.program_type, processed_count, from_slot, to_slot
-        );
-        Ok(())
-    }
-
-    /// Fetch blocks with retry logic
-    async fn fetch_blocks_with_retry(
-        &self,
-        slots: &[u64],
-        retry_count: usize,
-    ) -> Result<Vec<(u64, Result<Option<RpcBlock>, BackfillError>)>, IndexerError> {
-        if retry_count > 0 {
-            tokio::time::sleep(Duration::from_millis(
-                BACKFILL_RETRY_DELAY_MS * retry_count as u64,
-            ))
-            .await;
-        }
-
-        Ok(self
-            .rpc_poller
-            .get_blocks_batch(slots.to_vec())
-            .await
-            .into_iter()
-            .map(|(slot, result)| {
-                (
-                    slot,
-                    result.map_err(|e| BackfillError::SlotFetchFailed { slot, source: e }),
-                )
-            })
-            .collect::<Vec<(u64, Result<Option<RpcBlock>, BackfillError>)>>())
     }
 }
 
@@ -288,28 +306,28 @@ mod tests {
 
     #[test]
     fn test_validate_gap_no_gap() {
-        let result = BackfillService::validate_gap(100, 100, 1000);
+        let result = validate_gap(100, 100, 1000);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), None);
     }
 
     #[test]
     fn test_validate_gap_current_behind_checkpoint() {
-        let result = BackfillService::validate_gap(50, 100, 1000);
+        let result = validate_gap(50, 100, 1000);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), None);
     }
 
     #[test]
     fn test_validate_gap_within_limit() {
-        let result = BackfillService::validate_gap(150, 100, 1000);
+        let result = validate_gap(150, 100, 1000);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), Some(50));
     }
 
     #[test]
     fn test_validate_gap_exceeds_limit() {
-        let result = BackfillService::validate_gap(2000, 100, 1000);
+        let result = validate_gap(2000, 100, 1000);
         assert!(result.is_err());
         let err_msg = result.unwrap_err();
         let err_str = err_msg.to_string();
@@ -319,7 +337,7 @@ mod tests {
 
     #[test]
     fn test_validate_gap_exactly_at_limit() {
-        let result = BackfillService::validate_gap(1100, 100, 1000);
+        let result = validate_gap(1100, 100, 1000);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), Some(1000));
     }
@@ -330,7 +348,7 @@ mod tests {
 
     #[test]
     fn test_calculate_batches_full_batches() {
-        let batches = BackfillService::calculate_batches(100, 109, 3);
+        let batches = calculate_batches(100, 109, 3);
 
         assert_eq!(batches.len(), 3);
         assert_eq!(batches[0], vec![101, 102, 103]);
@@ -340,7 +358,7 @@ mod tests {
 
     #[test]
     fn test_calculate_batches_partial_last_batch() {
-        let batches = BackfillService::calculate_batches(100, 105, 3);
+        let batches = calculate_batches(100, 105, 3);
 
         assert_eq!(batches.len(), 2);
         assert_eq!(batches[0], vec![101, 102, 103]);
@@ -349,9 +367,471 @@ mod tests {
 
     #[test]
     fn test_calculate_batches_single_slot() {
-        let batches = BackfillService::calculate_batches(100, 101, 10);
+        let batches = calculate_batches(100, 101, 10);
 
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0], vec![101]);
+    }
+
+    #[test]
+    fn test_calculate_batches_same_from_to_slot() {
+        // from_slot == to_slot: next_slot = from_slot+1 > to_slot, so no iterations
+        let batches = calculate_batches(100, 100, 10);
+        assert!(batches.is_empty());
+    }
+
+    #[cfg(feature = "datasource-rpc")]
+    mod fill_slot_range_tests {
+        use super::*;
+        use crate::indexer::datasource::rpc_polling::rpc::RpcPoller;
+        use mockito::Server;
+        use serde_json::json;
+        use solana_sdk::commitment_config::CommitmentLevel;
+        use solana_transaction_status::UiTransactionEncoding;
+        use tokio::sync::mpsc;
+
+        fn empty_block_json() -> serde_json::Value {
+            json!({
+                "blockhash": "TestBlockHash11111111111111111111111111111",
+                "parentSlot": 0,
+                "transactions": []
+            })
+        }
+
+        fn mock_get_block_success(server: &mut Server, slot: u64) -> mockito::Mock {
+            server
+                .mock("POST", "/")
+                .match_body(mockito::Matcher::PartialJson(json!({
+                    "method": "getBlock",
+                    "params": [slot]
+                })))
+                .with_status(200)
+                .with_body(
+                    json!({
+                        "jsonrpc": "2.0",
+                        "result": empty_block_json(),
+                        "id": 1
+                    })
+                    .to_string(),
+                )
+                .create()
+        }
+
+        fn mock_get_block_skipped(server: &mut Server, slot: u64) -> mockito::Mock {
+            server
+                .mock("POST", "/")
+                .match_body(mockito::Matcher::PartialJson(json!({
+                    "method": "getBlock",
+                    "params": [slot]
+                })))
+                .with_status(200)
+                .with_body(
+                    json!({
+                        "jsonrpc": "2.0",
+                        "error": { "code": -32009, "message": "Slot was skipped" },
+                        "id": 1
+                    })
+                    .to_string(),
+                )
+                .create()
+        }
+
+        fn mock_get_block_error(server: &mut Server, slot: u64) -> mockito::Mock {
+            server
+                .mock("POST", "/")
+                .match_body(mockito::Matcher::PartialJson(json!({
+                    "method": "getBlock",
+                    "params": [slot]
+                })))
+                .with_status(200)
+                .with_body(
+                    json!({
+                        "jsonrpc": "2.0",
+                        "error": { "code": -32600, "message": "Invalid request" },
+                        "id": 1
+                    })
+                    .to_string(),
+                )
+                .create()
+        }
+
+        #[tokio::test]
+        async fn fill_slot_range_empty_blocks() {
+            let mut server = Server::new_async().await;
+
+            let _m1 = mock_get_block_success(&mut server, 101);
+            let _m2 = mock_get_block_success(&mut server, 102);
+            let _m3 = mock_get_block_success(&mut server, 103);
+
+            let poller = RpcPoller::new(
+                server.url(),
+                UiTransactionEncoding::Json,
+                CommitmentLevel::Finalized,
+            );
+
+            let (tx, mut rx) = mpsc::channel(64);
+            let result =
+                fill_slot_range(&poller, 100, 103, 10, ProgramType::Escrow, None, &tx).await;
+
+            assert_eq!(result.unwrap(), 3);
+            drop(tx);
+
+            let mut messages = vec![];
+            while let Some(msg) = rx.recv().await {
+                messages.push(msg);
+            }
+
+            assert_eq!(messages.len(), 3);
+            for (i, msg) in messages.iter().enumerate() {
+                match msg {
+                    ProcessorMessage::SlotComplete { slot, .. } => {
+                        assert_eq!(*slot, 101 + i as u64);
+                    }
+                    ProcessorMessage::Instruction(_) => {
+                        panic!("Expected no Instruction messages for empty blocks");
+                    }
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn fill_slot_range_skipped_slots() {
+            let mut server = Server::new_async().await;
+
+            let _m1 = mock_get_block_skipped(&mut server, 101);
+            let _m2 = mock_get_block_skipped(&mut server, 102);
+
+            let poller = RpcPoller::new(
+                server.url(),
+                UiTransactionEncoding::Json,
+                CommitmentLevel::Finalized,
+            );
+
+            let (tx, mut rx) = mpsc::channel(64);
+            let result =
+                fill_slot_range(&poller, 100, 102, 10, ProgramType::Escrow, None, &tx).await;
+
+            assert_eq!(result.unwrap(), 2);
+            drop(tx);
+
+            let mut messages = vec![];
+            while let Some(msg) = rx.recv().await {
+                messages.push(msg);
+            }
+
+            assert_eq!(messages.len(), 2);
+            for msg in &messages {
+                assert!(matches!(msg, ProcessorMessage::SlotComplete { .. }));
+            }
+        }
+
+        #[tokio::test]
+        async fn fill_slot_range_block_fetch_error() {
+            let mut server = Server::new_async().await;
+
+            let _m1 = mock_get_block_error(&mut server, 101);
+
+            let poller = RpcPoller::new(
+                server.url(),
+                UiTransactionEncoding::Json,
+                CommitmentLevel::Finalized,
+            );
+
+            let (tx, _rx) = mpsc::channel(64);
+            let result =
+                fill_slot_range(&poller, 100, 101, 10, ProgramType::Escrow, None, &tx).await;
+
+            assert!(result.is_err());
+        }
+
+        #[tokio::test]
+        async fn fill_slot_range_no_slots_in_range() {
+            let server = Server::new_async().await;
+
+            let poller = RpcPoller::new(
+                server.url(),
+                UiTransactionEncoding::Json,
+                CommitmentLevel::Finalized,
+            );
+
+            let (tx, _rx) = mpsc::channel(64);
+            let result =
+                fill_slot_range(&poller, 100, 100, 10, ProgramType::Escrow, None, &tx).await;
+
+            assert_eq!(result.unwrap(), 0);
+        }
+    }
+
+    // ============================================================================
+    // BackfillService Tests
+    // ============================================================================
+
+    #[cfg(feature = "datasource-rpc")]
+    mod backfill_service_tests {
+        use super::*;
+        use crate::config::BackfillConfig;
+        use crate::indexer::datasource::rpc_polling::rpc::RpcPoller;
+        use crate::storage::common::storage::mock::MockStorage;
+        use mockito::Server;
+        use serde_json::json;
+        use solana_sdk::commitment_config::CommitmentLevel;
+        use solana_transaction_status::UiTransactionEncoding;
+        use std::sync::Arc;
+        use tokio::sync::mpsc;
+
+        fn make_config(rpc_url: &str, max_gap_slots: u64) -> BackfillConfig {
+            BackfillConfig {
+                enabled: true,
+                exit_after_backfill: false,
+                rpc_url: rpc_url.to_string(),
+                batch_size: 10,
+                max_gap_slots,
+                start_slot: None,
+            }
+        }
+
+        fn make_poller(url: &str) -> Arc<RpcPoller> {
+            Arc::new(RpcPoller::new(
+                url.to_string(),
+                UiTransactionEncoding::Json,
+                CommitmentLevel::Finalized,
+            ))
+        }
+
+        fn mock_get_slot(server: &mut Server, slot: u64) -> mockito::Mock {
+            server
+                .mock("POST", "/")
+                .match_body(mockito::Matcher::PartialJson(json!({"method": "getSlot"})))
+                .with_status(200)
+                .with_body(json!({"jsonrpc": "2.0", "result": slot, "id": 1}).to_string())
+                .create()
+        }
+
+        fn mock_get_block_empty(server: &mut Server, slot: u64) -> mockito::Mock {
+            server
+                .mock("POST", "/")
+                .match_body(mockito::Matcher::PartialJson(json!({
+                    "method": "getBlock",
+                    "params": [slot]
+                })))
+                .with_status(200)
+                .with_body(
+                    json!({
+                        "jsonrpc": "2.0",
+                        "result": {
+                            "blockhash": "TestBlockHash111111111111111111111111111",
+                            "parentSlot": slot - 1,
+                            "transactions": []
+                        },
+                        "id": 1
+                    })
+                    .to_string(),
+                )
+                .create()
+        }
+
+        // ---- BackfillService::new ----
+
+        /// All five constructor arguments are stored verbatim; no transformation occurs.
+        #[test]
+        fn new_stores_escrow_instance_id() {
+            use solana_sdk::pubkey::Pubkey;
+            let storage = Arc::new(Storage::Mock(MockStorage::new()));
+            let poller = make_poller("http://localhost:8899");
+            let config = make_config("http://localhost:8899", 500);
+            let key = Pubkey::new_unique();
+
+            let service =
+                BackfillService::new(storage, poller, ProgramType::Withdraw, config, Some(key));
+
+            assert_eq!(service.program_type, ProgramType::Withdraw);
+            assert_eq!(service.config.max_gap_slots, 500);
+            assert_eq!(service.escrow_instance_id, Some(key));
+        }
+
+        // ---- BackfillService::run ----
+
+        /// checkpoint == current_slot means validate_gap returns None; run exits early
+        /// without sending any messages or fetching blocks.
+        #[tokio::test]
+        async fn run_no_gap_returns_ok_without_fetching_blocks() {
+            let mut server = Server::new_async().await;
+            let _m_slot = mock_get_slot(&mut server, 100);
+
+            let mock = MockStorage::new();
+            mock.set_checkpoint("escrow", 100);
+            let storage = Arc::new(Storage::Mock(mock));
+            let poller = make_poller(&server.url());
+            let config = make_config(&server.url(), 1000);
+            let (tx, mut rx) = mpsc::channel(64);
+
+            let service = BackfillService::new(storage, poller, ProgramType::Escrow, config, None);
+            service.run(tx).await.unwrap();
+
+            // tx dropped by run(); channel is empty — no SlotComplete or Instruction sent
+            assert!(
+                rx.try_recv().is_err(),
+                "expected no messages when there is no gap"
+            );
+        }
+
+        /// current_slot < checkpoint means the RPC node is lagging; treated as no gap,
+        /// no backfill attempted, no messages sent.
+        #[tokio::test]
+        async fn run_current_slot_behind_checkpoint_no_gap() {
+            let mut server = Server::new_async().await;
+            let _m_slot = mock_get_slot(&mut server, 50);
+
+            let mock = MockStorage::new();
+            mock.set_checkpoint("escrow", 100);
+            let storage = Arc::new(Storage::Mock(mock));
+            let poller = make_poller(&server.url());
+            let config = make_config(&server.url(), 1000);
+            let (tx, mut rx) = mpsc::channel(64);
+
+            let service = BackfillService::new(storage, poller, ProgramType::Escrow, config, None);
+            service.run(tx).await.unwrap();
+
+            assert!(
+                rx.try_recv().is_err(),
+                "expected no messages when RPC slot is behind checkpoint"
+            );
+        }
+
+        // ---- BackfillService::run — gap too large ----
+
+        /// A gap of 5000 slots with max_gap_slots=1000 must be rejected with a descriptive
+        /// error rather than silently attempting an oversized backfill.
+        #[tokio::test]
+        async fn run_gap_too_large_returns_err() {
+            let mut server = Server::new_async().await;
+            let _m_slot = mock_get_slot(&mut server, 5000); // checkpoint=0, gap=5000
+
+            let storage = Arc::new(Storage::Mock(MockStorage::new()));
+            let poller = make_poller(&server.url());
+            let config = make_config(&server.url(), 1000);
+            let (tx, _rx) = mpsc::channel(64);
+
+            let service = BackfillService::new(storage, poller, ProgramType::Escrow, config, None);
+            let err = service.run(tx).await.unwrap_err();
+
+            let msg = err.to_string();
+            assert!(msg.contains("Gap too large"), "unexpected error: {msg}");
+            assert!(
+                msg.contains("5000"),
+                "error should report the actual gap: {msg}"
+            );
+        }
+
+        // ---- BackfillService::run — fills actual gap ----
+
+        /// For a 3-slot gap (checkpoint=100, tip=103), run fetches each block and emits
+        /// exactly one ordered SlotComplete per slot with no Instruction messages.
+        #[tokio::test]
+        async fn run_fills_gap_sends_slot_complete_per_slot() {
+            let mut server = Server::new_async().await;
+            let _m_slot = mock_get_slot(&mut server, 103);
+            let _m_b101 = mock_get_block_empty(&mut server, 101);
+            let _m_b102 = mock_get_block_empty(&mut server, 102);
+            let _m_b103 = mock_get_block_empty(&mut server, 103);
+
+            let mock = MockStorage::new();
+            mock.set_checkpoint("escrow", 100);
+            let storage = Arc::new(Storage::Mock(mock));
+            let poller = make_poller(&server.url());
+            let config = make_config(&server.url(), 1000);
+            let (tx, mut rx) = mpsc::channel(64);
+
+            let service = BackfillService::new(storage, poller, ProgramType::Escrow, config, None);
+            service.run(tx).await.unwrap();
+
+            // Collect all messages; tx was dropped by run() so the channel is now closed
+            let messages: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+            assert_eq!(messages.len(), 3, "expected one SlotComplete per slot");
+
+            let slots: Vec<u64> = messages
+                .iter()
+                .map(|m| match m {
+                    ProcessorMessage::SlotComplete { slot, .. } => *slot,
+                    ProcessorMessage::Instruction(_) => panic!("unexpected Instruction message"),
+                })
+                .collect();
+            assert_eq!(slots, vec![101, 102, 103]);
+        }
+
+        // ---- BackfillService::run — start_slot configured ----
+
+        /// When start_slot=200 is ahead of the DB checkpoint=100, the effective from_slot
+        /// becomes 199 (start_slot-1), so nothing before slot 200 is re-processed.
+        #[tokio::test]
+        async fn run_start_slot_ahead_of_checkpoint_uses_start_slot() {
+            let mut server = Server::new_async().await;
+            // effective from_slot=199; current_slot=199 → no gap, no blocks fetched
+            let _m_slot = mock_get_slot(&mut server, 199);
+
+            let mock = MockStorage::new();
+            mock.set_checkpoint("escrow", 100);
+            let storage = Arc::new(Storage::Mock(mock));
+            let poller = make_poller(&server.url());
+            let mut config = make_config(&server.url(), 10_000);
+            config.start_slot = Some(200);
+            let (tx, mut rx) = mpsc::channel(64);
+
+            let service = BackfillService::new(storage, poller, ProgramType::Escrow, config, None);
+            service.run(tx).await.unwrap();
+
+            assert!(
+                rx.try_recv().is_err(),
+                "no messages expected; start_slot skipped past the gap"
+            );
+        }
+
+        /// When the DB checkpoint=200 is ahead of start_slot=50, the checkpoint wins
+        /// (max logic), so already-processed slots are not re-fetched.
+        #[tokio::test]
+        async fn run_checkpoint_ahead_of_start_slot_uses_checkpoint() {
+            let mut server = Server::new_async().await;
+            // effective from_slot=200; current_slot=200 → no gap
+            let _m_slot = mock_get_slot(&mut server, 200);
+
+            let mock = MockStorage::new();
+            mock.set_checkpoint("escrow", 200);
+            let storage = Arc::new(Storage::Mock(mock));
+            let poller = make_poller(&server.url());
+            let mut config = make_config(&server.url(), 10_000);
+            config.start_slot = Some(50);
+            let (tx, mut rx) = mpsc::channel(64);
+
+            let service = BackfillService::new(storage, poller, ProgramType::Escrow, config, None);
+            service.run(tx).await.unwrap();
+
+            assert!(
+                rx.try_recv().is_err(),
+                "no messages expected; checkpoint supersedes start_slot"
+            );
+        }
+
+        /// start_slot=0 is the genesis edge case: configured_checkpoint clamps to 0
+        /// (avoids u64 underflow), which is identical to having no checkpoint at all.
+        #[tokio::test]
+        async fn run_start_slot_zero_uses_zero_checkpoint() {
+            let mut server = Server::new_async().await;
+            // from_slot=0, current_slot=0 → no gap
+            let _m_slot = mock_get_slot(&mut server, 0);
+
+            let storage = Arc::new(Storage::Mock(MockStorage::new()));
+            let poller = make_poller(&server.url());
+            let mut config = make_config(&server.url(), 10_000);
+            config.start_slot = Some(0);
+            let (tx, mut rx) = mpsc::channel(64);
+
+            let service = BackfillService::new(storage, poller, ProgramType::Escrow, config, None);
+            service.run(tx).await.unwrap();
+
+            assert!(
+                rx.try_recv().is_err(),
+                "no messages expected for zero-slot no-gap case"
+            );
+        }
     }
 }

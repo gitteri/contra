@@ -5,7 +5,7 @@ use solana_sdk::{commitment_config::CommitmentLevel, pubkey::Pubkey};
 use solana_transaction_status::UiTransactionEncoding;
 
 use crate::indexer::datasource::common::parser::{
-    CONTRA_ESCROW_PROGRAM_ID, CONTRA_WITHDRAW_PROGRAM_ID,
+    PRIVATE_CHANNEL_ESCROW_PROGRAM_ID, PRIVATE_CHANNEL_WITHDRAW_PROGRAM_ID,
 };
 use crate::operator::SignerUtil;
 
@@ -13,20 +13,29 @@ use crate::operator::SignerUtil;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum ProgramType {
-    /// Contra Escrow Program
+    /// PrivateChannel Escrow Program
     Escrow,
-    /// Contra Withdraw Program
+    /// PrivateChannel Withdraw Program
     Withdraw,
+}
+
+impl private_channel_metrics::MetricLabel for ProgramType {
+    fn as_label(&self) -> &'static str {
+        match self {
+            ProgramType::Escrow => "escrow",
+            ProgramType::Withdraw => "withdraw",
+        }
+    }
 }
 
 impl ProgramType {
     pub fn to_pubkey(&self) -> Pubkey {
         match self {
             ProgramType::Escrow => {
-                Pubkey::from_str(CONTRA_ESCROW_PROGRAM_ID).expect("Invalid program ID")
+                Pubkey::from_str(PRIVATE_CHANNEL_ESCROW_PROGRAM_ID).expect("Invalid program ID")
             }
             ProgramType::Withdraw => {
-                Pubkey::from_str(CONTRA_WITHDRAW_PROGRAM_ID).expect("Invalid program ID")
+                Pubkey::from_str(PRIVATE_CHANNEL_WITHDRAW_PROGRAM_ID).expect("Invalid program ID")
             }
         }
     }
@@ -106,7 +115,7 @@ pub struct BackfillConfig {
 
 /// Common configuration shared by both indexer and operator modes
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ContraIndexerConfig {
+pub struct PrivateChannelIndexerConfig {
     /// Program to index
     pub program_type: ProgramType,
     /// Storage type
@@ -115,7 +124,7 @@ pub struct ContraIndexerConfig {
     pub rpc_url: String,
     /// Source chain RPC URL for cross-chain operators (optional)
     /// Used by escrow operator to read mint metadata from Solana
-    /// while sending mint transactions to Contra via rpc_url
+    /// while sending mint transactions to PrivateChannel via rpc_url
     pub source_rpc_url: Option<String>,
     /// Postgres configuration
     pub postgres: PostgresConfig,
@@ -123,29 +132,35 @@ pub struct ContraIndexerConfig {
     pub escrow_instance_id: Option<Pubkey>,
 }
 
-impl ContraIndexerConfig {
-    /// Validate common configuration
+impl PrivateChannelIndexerConfig {
     pub fn validate(&self) -> Result<(), String> {
-        // Validate escrow_instance_id based on program type
-        match self.program_type {
-            ProgramType::Escrow => {
-                if self.escrow_instance_id.is_none() {
-                    return Err(
-                        "--escrow-instance-id required when program_type is Escrow".to_string()
-                    );
-                }
+        match (self.program_type, &self.escrow_instance_id) {
+            (ProgramType::Escrow, None) => {
+                Err("--escrow-instance-id required when program_type is Escrow".to_string())
             }
-            ProgramType::Withdraw => {
-                if self.escrow_instance_id.is_some() {
-                    return Err(
-                        "--escrow-instance-id should not be set for Withdraw program".to_string(),
-                    );
-                }
+            (ProgramType::Withdraw, Some(_)) => {
+                Err("--escrow-instance-id should not be set for Withdraw program".to_string())
             }
+            _ => Ok(()),
         }
-
-        Ok(())
     }
+}
+
+/// Configuration for startup reconciliation against on-chain state.
+///
+/// Only applies when `program_type = escrow`. Skipped for `withdraw` indexers.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ReconciliationConfig {
+    /// Maximum absolute mismatch (in raw token units) allowed before blocking startup.
+    /// 0 (default) means any mismatch blocks startup.
+    /// Mismatches above this value log error + emit alert and abort.
+    /// Mismatches at or below this value (but > 0) log a warning and continue.
+    ///
+    /// There is a small race window between the DB balance query and the on-chain RPC
+    /// fetch: a deposit arriving in that window will appear in the ATA but not yet in
+    /// the DB, producing a transient false positive. If spurious failures occur in
+    /// production, set this to the raw amount of one or two minimum deposits.
+    pub mismatch_threshold_raw: u64,
 }
 
 /// Indexer-specific configuration
@@ -159,6 +174,9 @@ pub struct IndexerConfig {
     pub yellowstone: Option<YellowstoneConfig>,
     /// Backfill configuration for crash recovery
     pub backfill: BackfillConfig,
+    /// Startup reconciliation configuration
+    #[serde(default)]
+    pub reconciliation: ReconciliationConfig,
 }
 
 impl IndexerConfig {
@@ -239,6 +257,44 @@ pub struct OperatorConfig {
     pub channel_buffer_size: usize,
     /// RPC commitment level for operator transactions
     pub rpc_commitment: CommitmentLevel,
+    /// Webhook URL for alerting on failed transactions. Set via ALERT_WEBHOOK env var.
+    pub alert_webhook_url: Option<String>,
+    /// How often to run escrow balance reconciliation checks
+    #[serde(default = "default_reconciliation_interval")]
+    pub reconciliation_interval: std::time::Duration,
+    /// Tolerance threshold in basis points (100 bps = 1%)
+    #[serde(default = "default_reconciliation_tolerance")]
+    pub reconciliation_tolerance_bps: u16,
+    /// Webhook URL for reconciliation alerts (optional)
+    pub reconciliation_webhook_url: Option<String>,
+    /// How often to check the feepayer SOL balance (escrow operators only)
+    #[serde(default = "default_feepayer_monitor_interval")]
+    pub feepayer_monitor_interval: std::time::Duration,
+    /// Milliseconds between `getSignatureStatuses` polls when confirming a sent transaction.
+    /// Lower values reduce per-tx latency on PrivateChannel (~100 ms); higher values suit Solana
+    /// (~400 ms block time). Defaults to `DEFAULT_CONFIRMATION_POLL_INTERVAL_MS`.
+    #[serde(default = "default_confirmation_poll_interval_ms")]
+    pub confirmation_poll_interval_ms: u64,
+}
+
+/// Default poll interval for `confirmation_poll_interval_ms`, matching Solana's ~400 ms block time.
+/// operator-solana overrides this to 100 ms since PrivateChannel confirms faster.
+pub const DEFAULT_CONFIRMATION_POLL_INTERVAL_MS: u64 = 400;
+
+fn default_reconciliation_interval() -> std::time::Duration {
+    std::time::Duration::from_secs(5 * 60) // 5 minutes
+}
+
+fn default_reconciliation_tolerance() -> u16 {
+    10 // 10 basis points = 0.1%
+}
+
+fn default_feepayer_monitor_interval() -> std::time::Duration {
+    std::time::Duration::from_secs(60)
+}
+
+fn default_confirmation_poll_interval_ms() -> u64 {
+    DEFAULT_CONFIRMATION_POLL_INTERVAL_MS
 }
 
 impl OperatorConfig {
@@ -263,9 +319,9 @@ mod tests {
     // Test Helper Functions
     // ============================================================================
 
-    fn create_common_config() -> ContraIndexerConfig {
+    fn create_common_config() -> PrivateChannelIndexerConfig {
         use std::str::FromStr;
-        ContraIndexerConfig {
+        PrivateChannelIndexerConfig {
             program_type: ProgramType::Escrow,
             storage_type: StorageType::Postgres,
             rpc_url: "http://localhost:8899".to_string(),
@@ -298,6 +354,7 @@ mod tests {
                 exit_after_backfill: false,
                 rpc_url: "http://localhost:8899".to_string(),
             },
+            reconciliation: ReconciliationConfig::default(),
         }
     }
 
@@ -307,7 +364,7 @@ mod tests {
 
     #[test]
     fn test_validate_common_config_escrow_missing_instance_id() {
-        let config = ContraIndexerConfig {
+        let config = PrivateChannelIndexerConfig {
             program_type: ProgramType::Escrow,
             escrow_instance_id: None, // Missing required instance ID
             ..create_common_config()
@@ -323,7 +380,7 @@ mod tests {
     #[test]
     fn test_validate_common_config_withdraw_with_instance_id() {
         use std::str::FromStr;
-        let config = ContraIndexerConfig {
+        let config = PrivateChannelIndexerConfig {
             program_type: ProgramType::Withdraw,
             escrow_instance_id: Some(Pubkey::from_str("11111111111111111111111111111111").unwrap()),
             ..create_common_config()

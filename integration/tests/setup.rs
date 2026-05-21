@@ -1,14 +1,21 @@
 #![allow(unused)]
 
 use {
+    dvp_swap_program_client::{instructions::CreateDvpBuilder, DVP_SWAP_PROGRAM_ID},
     solana_sdk::{
-        account::{Account, AccountSharedData, ReadableAccount},
-        epoch_schedule::EpochSchedule,
+        account::AccountSharedData,
+        hash::Hash,
+        message::{v0, Message, VersionedMessage},
         program_pack::Pack,
         pubkey::Pubkey,
         signature::Keypair,
+        signer::Signer,
+        transaction::{Transaction, VersionedTransaction},
     },
     solana_system_interface::program as system_program,
+    spl_associated_token_account::{
+        get_associated_token_address, get_associated_token_address_with_program_id,
+    },
     spl_token::state::{Account as TokenAccount, Mint},
 };
 
@@ -18,25 +25,10 @@ pub enum TransactionType {
     V0,
 }
 
-const SLOTS_PER_EPOCH: u64 = 50;
-
 pub fn get_token_account_balance(data: &[u8]) -> u64 {
-    let state = TokenAccount::unpack(data).unwrap();
-    state.amount
+    TokenAccount::unpack(data).unwrap().amount
 }
 
-use solana_sdk::{
-    hash::Hash,
-    instruction::Instruction,
-    message::{v0, Message, VersionedMessage},
-    signer::Signer,
-    transaction::{Transaction, VersionedTransaction},
-};
-use spl_associated_token_account::{
-    get_associated_token_address, get_associated_token_address_with_program_id,
-};
-
-/// Create a transaction to create and initialize a mint account
 pub fn create_mint_account_transaction(
     payer: &Keypair,
     mint_keypair: &Keypair,
@@ -44,22 +36,17 @@ pub fn create_mint_account_transaction(
     decimals: u8,
     recent_blockhash: Hash,
 ) -> Transaction {
-    // For admin transactions in Contra:
-    // - The admin VM automatically creates accounts for admin instructions
-    // - We only need to send the initialize_mint instruction with the target mint pubkey
-    // - The mint keypair does NOT sign because the account doesn't exist yet
-    //   and the admin VM will create it at the specified address
+    // PrivateChannel's admin VM creates the account automatically, so only initialize_mint
+    // is needed and the mint keypair does NOT sign.
     let init_mint_ix = spl_token::instruction::initialize_mint(
         &spl_token::id(),
         &mint_keypair.pubkey(),
         mint_authority,
-        None, // freeze authority
+        None,
         decimals,
     )
     .unwrap();
 
-    // Only the payer signs - the mint keypair is NOT included as a signer
-    // because Contra's admin VM creates the account automatically
     Transaction::new_signed_with_payer(
         &[init_mint_ix],
         Some(&payer.pubkey()),
@@ -68,7 +55,6 @@ pub fn create_mint_account_transaction(
     )
 }
 
-/// Create a transaction to mint tokens to an account
 pub fn mint_to_transaction(
     payer: &Keypair,
     mint: &Pubkey,
@@ -95,7 +81,6 @@ pub fn mint_to_transaction(
     )
 }
 
-/// Create a transaction to transfer tokens between accounts
 pub fn transfer_tokens_transaction(
     from: &Keypair,
     to: &Pubkey,
@@ -123,8 +108,6 @@ pub fn transfer_tokens_transaction(
     )
 }
 
-/// Create a versioned transaction to transfer tokens between accounts
-/// Supports both Legacy and V0 transaction types
 pub fn transfer_tokens_versioned_transaction(
     from: &Keypair,
     to: &Pubkey,
@@ -155,13 +138,9 @@ pub fn transfer_tokens_versioned_transaction(
             VersionedMessage::Legacy(legacy_message)
         }
         TransactionType::V0 => {
-            let v0_message = v0::Message::try_compile(
-                &from.pubkey(),
-                &[transfer_ix],
-                &[], // No address lookup tables
-                recent_blockhash,
-            )
-            .unwrap();
+            let v0_message =
+                v0::Message::try_compile(&from.pubkey(), &[transfer_ix], &[], recent_blockhash)
+                    .unwrap();
             VersionedMessage::V0(v0_message)
         }
     };
@@ -175,9 +154,8 @@ pub fn withdraw_funds_transaction(
     amount: u64,
     recent_blockhash: Hash,
 ) -> Transaction {
-    use contra_withdraw_program_client::instructions::WithdrawFundsBuilder;
+    use private_channel_withdraw_program_client::instructions::WithdrawFundsBuilder;
 
-    // Contra only supports SPL token
     let token_account =
         get_associated_token_address_with_program_id(&from.pubkey(), mint, &spl_token::ID);
 
@@ -198,32 +176,126 @@ pub fn withdraw_funds_transaction(
     )
 }
 
-/// Create an empty transaction (no instructions)
 pub fn empty_transaction(payer: &Keypair, recent_blockhash: Hash) -> Transaction {
-    Transaction::new_signed_with_payer(
-        &[], // Empty instructions
-        Some(&payer.pubkey()),
-        &[payer],
-        recent_blockhash,
+    Transaction::new_signed_with_payer(&[], Some(&payer.pubkey()), &[payer], recent_blockhash)
+}
+
+pub fn swap_dvp_pda(
+    settlement_authority: &Pubkey,
+    user_a: &Pubkey,
+    user_b: &Pubkey,
+    mint_a: &Pubkey,
+    mint_b: &Pubkey,
+    nonce: u64,
+) -> (Pubkey, u8) {
+    let nonce_bytes = nonce.to_le_bytes();
+    Pubkey::find_program_address(
+        &[
+            b"dvp",
+            settlement_authority.as_ref(),
+            user_a.as_ref(),
+            user_b.as_ref(),
+            mint_a.as_ref(),
+            mint_b.as_ref(),
+            &nonce_bytes,
+        ],
+        &DVP_SWAP_PROGRAM_ID,
     )
 }
 
-/// Create a mixed transaction with both admin and non-admin instructions
+#[allow(clippy::too_many_arguments)]
+pub fn create_dvp_transaction(
+    payer: &Keypair,
+    user_a: Pubkey,
+    user_b: Pubkey,
+    mint_a: &Pubkey,
+    mint_b: &Pubkey,
+    settlement_authority: Pubkey,
+    amount_a: u64,
+    amount_b: u64,
+    expiry_timestamp: i64,
+    earliest_settlement_timestamp: Option<i64>,
+    nonce: u64,
+    recent_blockhash: Hash,
+) -> Transaction {
+    let (swap_dvp, _) = swap_dvp_pda(
+        &settlement_authority,
+        &user_a,
+        &user_b,
+        mint_a,
+        mint_b,
+        nonce,
+    );
+    let dvp_ata_a = get_associated_token_address_with_program_id(&swap_dvp, mint_a, &spl_token::ID);
+    let dvp_ata_b = get_associated_token_address_with_program_id(&swap_dvp, mint_b, &spl_token::ID);
+
+    let mut builder = CreateDvpBuilder::new();
+    builder
+        .payer(payer.pubkey())
+        .swap_dvp(swap_dvp)
+        .mint_a(*mint_a)
+        .mint_b(*mint_b)
+        .dvp_ata_a(dvp_ata_a)
+        .dvp_ata_b(dvp_ata_b)
+        .token_program_a(spl_token::ID)
+        .token_program_b(spl_token::ID)
+        .user_a(user_a)
+        .user_b(user_b)
+        .settlement_authority(settlement_authority)
+        .amount_a(amount_a)
+        .amount_b(amount_b)
+        .expiry_timestamp(expiry_timestamp)
+        .nonce(nonce);
+    if let Some(t) = earliest_settlement_timestamp {
+        builder.earliest_settlement_timestamp(t);
+    }
+    let ix = builder.instruction();
+
+    Transaction::new_signed_with_payer(&[ix], Some(&payer.pubkey()), &[payer], recent_blockhash)
+}
+
+/// Fund a DvP leg by issuing a plain SPL transfer from the signer's ATA
+/// to the DvP's escrow ATA. The swap program no longer has a `FundDvp`
+/// instruction — funding is intentionally an out-of-band SPL transfer so
+/// custodian integrations need no custom program call.
+pub fn fund_dvp_transaction(
+    signer: &Keypair,
+    swap_dvp: Pubkey,
+    leg_mint: &Pubkey,
+    amount: u64,
+    recent_blockhash: Hash,
+) -> Transaction {
+    let signer_source_ata =
+        get_associated_token_address_with_program_id(&signer.pubkey(), leg_mint, &spl_token::ID);
+    let dvp_dest_ata =
+        get_associated_token_address_with_program_id(&swap_dvp, leg_mint, &spl_token::ID);
+
+    let ix = spl_token::instruction::transfer(
+        &spl_token::ID,
+        &signer_source_ata,
+        &dvp_dest_ata,
+        &signer.pubkey(),
+        &[],
+        amount,
+    )
+    .expect("build SPL transfer for DvP funding");
+
+    Transaction::new_signed_with_payer(&[ix], Some(&signer.pubkey()), &[signer], recent_blockhash)
+}
+
 pub fn mixed_transaction(
     admin: &Keypair,
     non_admin: &Keypair,
     mint: &Pubkey,
     destination: &Pubkey,
     mint_authority: &Pubkey,
-    _amount: u64,
+    amount: u64,
     recent_blockhash: Hash,
 ) -> Transaction {
-    // Admin instruction: initialize mint (instruction type 0 is the only admin instruction)
     let init_mint_ix =
         spl_token::instruction::initialize_mint(&spl_token::id(), mint, mint_authority, None, 3)
             .unwrap();
 
-    // Non-admin instruction: transfer tokens
     let from_token_account = get_associated_token_address(&non_admin.pubkey(), mint);
     let to_token_account = get_associated_token_address(&admin.pubkey(), mint);
     let transfer_ix = spl_token::instruction::transfer(
@@ -232,11 +304,10 @@ pub fn mixed_transaction(
         &to_token_account,
         &non_admin.pubkey(),
         &[],
-        1000,
+        amount,
     )
     .unwrap();
 
-    // Both admin and non-admin need to sign
     Transaction::new_signed_with_payer(
         &[init_mint_ix, transfer_ix],
         Some(&admin.pubkey()),
@@ -250,22 +321,19 @@ pub fn mint_account() -> AccountSharedData {
 }
 
 pub fn mint_account_with_authority(mint_authority: &Pubkey) -> AccountSharedData {
-    let data = {
-        let mut data = [0; Mint::LEN];
-        Mint::pack(
-            Mint {
-                supply: 100_000_000,
-                decimals: 0,
-                is_initialized: true,
-                mint_authority: Some(*mint_authority).into(),
-                ..Default::default()
-            },
-            &mut data,
-        )
-        .unwrap();
-        data
-    };
-    // Rent-exempt minimum for mint account
+    let mut data = [0; Mint::LEN];
+    Mint::pack(
+        Mint {
+            supply: 100_000_000,
+            decimals: 0,
+            is_initialized: true,
+            mint_authority: Some(*mint_authority).into(),
+            ..Default::default()
+        },
+        &mut data,
+    )
+    .unwrap();
+
     let rent_exempt_balance = 1_461_600;
     let mut account = AccountSharedData::new(rent_exempt_balance, data.len(), &spl_token::id());
     account.set_data_from_slice(&data);
@@ -277,22 +345,19 @@ pub fn system_account(lamports: u64) -> AccountSharedData {
 }
 
 pub fn token_account(owner: &Pubkey, mint: &Pubkey, amount: u64) -> AccountSharedData {
-    let data = {
-        let mut data = [0; TokenAccount::LEN];
-        TokenAccount::pack(
-            TokenAccount {
-                mint: *mint,
-                owner: *owner,
-                amount,
-                state: spl_token::state::AccountState::Initialized,
-                ..Default::default()
-            },
-            &mut data,
-        )
-        .unwrap();
-        data
-    };
-    // Rent-exempt minimum for token account
+    let mut data = [0; TokenAccount::LEN];
+    TokenAccount::pack(
+        TokenAccount {
+            mint: *mint,
+            owner: *owner,
+            amount,
+            state: spl_token::state::AccountState::Initialized,
+            ..Default::default()
+        },
+        &mut data,
+    )
+    .unwrap();
+
     let rent_exempt_balance = 2_039_280;
     let mut account = AccountSharedData::new(rent_exempt_balance, data.len(), &spl_token::id());
     account.set_data_from_slice(&data);

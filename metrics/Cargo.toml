@@ -1,0 +1,13 @@
+[package]
+name = "private-channel-metrics"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+axum = { workspace = true }
+prometheus = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+reqwest = { workspace = true }

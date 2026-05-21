@@ -27,17 +27,13 @@ async fn get_blocks_postgres(
 ) -> Result<Vec<u64>> {
     let pool = db.pool.clone();
 
-    // Determine the end slot - either use provided value or get latest slot
-    let end_slot = if let Some(end) = end_slot {
-        end
-    } else {
-        // Get the latest slot from the database
-        let latest_slot = sqlx::query_scalar::<_, Option<i64>>("SELECT MAX(slot) FROM blocks")
+    let end_slot = match end_slot {
+        Some(end) => end,
+        None => sqlx::query_scalar::<_, Option<i64>>("SELECT MAX(slot) FROM blocks")
             .fetch_one(pool.as_ref())
             .await
             .context("Failed to query latest slot")?
-            .context("No blocks found in database")? as u64;
-        latest_slot
+            .context("No blocks found in database")? as u64,
     };
 
     // Enforce maximum range constraint
@@ -70,15 +66,14 @@ async fn get_blocks_redis(
 ) -> Result<Vec<u64>> {
     let mut conn = db.connection.clone();
 
-    // Determine the end slot - either use provided value or get latest slot
-    let end_slot = if let Some(end) = end_slot {
-        end
-    } else {
-        // Get the latest slot from Redis
-        let latest_slot: redis::RedisResult<Option<u64>> = conn.get("latest_slot").await;
-        latest_slot
-            .map_err(|e| anyhow!("Failed to get latest slot from Redis: {}", e))?
-            .context("No latest slot found in Redis")?
+    let end_slot = match end_slot {
+        Some(end) => end,
+        None => {
+            let latest_slot: redis::RedisResult<Option<u64>> = conn.get("latest_slot").await;
+            latest_slot
+                .map_err(|e| anyhow!("Failed to get latest slot from Redis: {}", e))?
+                .context("No latest slot found in Redis")?
+        }
     };
 
     // Enforce maximum range constraint
@@ -90,17 +85,17 @@ async fn get_blocks_redis(
         ));
     }
 
-    // Query blocks within the range
-    // In Redis, blocks are stored with keys like "block:{slot}"
-    // We need to check which slots have blocks
-    let mut slots = Vec::new();
-    for slot in start_slot..=end_slot {
-        let key = format!("block:{}", slot);
-        let exists: redis::RedisResult<bool> = conn.exists(&key).await;
-        if exists.unwrap_or(false) {
-            slots.push(slot);
-        }
-    }
+    // ZRANGE ... BYSCORE queries only the requested range in O(log N + M),
+    // where N is total slots indexed and M is the number of results returned.
+    // Results are returned in ascending score order (slot order) by default.
+    let slots: Vec<u64> = redis::cmd("ZRANGE")
+        .arg("block_slot_index")
+        .arg(start_slot)
+        .arg(end_slot)
+        .arg("BYSCORE")
+        .query_async(&mut conn)
+        .await
+        .map_err(|e| anyhow!("Failed to query block slot index in Redis: {}", e))?;
 
     Ok(slots)
 }

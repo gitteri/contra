@@ -1,4 +1,7 @@
-use crate::rpc::{error::custom_error, ReadDeps};
+use crate::rpc::{
+    error::{custom_error, JSON_RPC_SERVER_ERROR},
+    ReadDeps,
+};
 use jsonrpsee::core::RpcResult;
 use solana_rpc_client_types::config::RpcSupplyConfig;
 use solana_rpc_client_types::response::{Response, RpcResponseContext, RpcSupply};
@@ -12,9 +15,15 @@ pub async fn get_supply_impl(
         .accounts_db
         .get_latest_slot()
         .await
-        .map_err(|e| custom_error(-32000, format!("Failed to get latest slot: {}", e)))?;
+        .map_err(|e| {
+            custom_error(
+                JSON_RPC_SERVER_ERROR,
+                format!("Failed to get latest slot: {}", e),
+            )
+        })?
+        .unwrap_or(0);
 
-    // Contra has no native token supply, so all values are 0
+    // PrivateChannel has no native token supply, so all values are 0
     Ok(Response {
         context: RpcResponseContext::new(slot),
         value: RpcSupply {

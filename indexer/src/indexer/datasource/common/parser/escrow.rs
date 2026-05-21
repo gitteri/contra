@@ -8,8 +8,8 @@ use borsh::BorshDeserialize;
 use serde::{Deserialize, Serialize};
 use solana_sdk::pubkey::Pubkey;
 
-// Contra Escrow Program ID
-pub const CONTRA_ESCROW_PROGRAM_ID: &str = "GokvZqD2yP696rzNBNbQvcZ4VsLW7jNvFXU1kW9m7k83";
+// PrivateChannel Escrow Program ID
+pub const PRIVATE_CHANNEL_ESCROW_PROGRAM_ID: &str = "GokvZqD2yP696rzNBNbQvcZ4VsLW7jNvFXU1kW9m7k83";
 
 // Instruction discriminators (from IDL)
 const CREATE_INSTANCE: u8 = 0;
@@ -21,8 +21,13 @@ const RESET_SMT_ROOT: u8 = 8;
 // Event related constants
 const EVENT_IX_TAG_LE: &[u8] = &[0xe4, 0x45, 0xa5, 0x2e, 0x51, 0xcb, 0x9a, 0x1d];
 const ALLOW_MINT_EVENT_DISCRIMINATOR: u8 = 1;
+const DEPOSIT_EVENT_DISCRIMINATOR: u8 = 6;
 const EVENT_DISCRIMINATOR_INDEX: usize = 8;
+// AllowMintEvent: tag(8)+disc(1)+instance_seed(32)+mint(32) = 73
 const EVENT_DECIMALS_INDEX: usize = 73;
+// DepositEvent: tag(8)+disc(1)+instance_seed(32)+user(32) = 73
+// (same offset, different event)
+const EVENT_AMOUNT_INDEX: usize = 73;
 
 // ******************************************************************************************
 // Instruction types
@@ -43,6 +48,7 @@ pub enum EscrowInstruction {
     Deposit {
         accounts: DepositAccounts,
         data: DepositData,
+        event: DepositEvent,
     },
     ReleaseFunds {
         accounts: ReleaseFundsAccounts,
@@ -61,7 +67,7 @@ pub struct CreateInstanceAccounts {
     pub instance: Pubkey,
     pub system_program: Pubkey,
     pub event_authority: Pubkey,
-    pub contra_escrow_program: Pubkey,
+    pub private_channel_escrow_program: Pubkey,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,7 +82,7 @@ pub struct AllowMintAccounts {
     pub token_program: Pubkey,
     pub associated_token_program: Pubkey,
     pub event_authority: Pubkey,
-    pub contra_escrow_program: Pubkey,
+    pub private_channel_escrow_program: Pubkey,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -92,7 +98,7 @@ pub struct DepositAccounts {
     pub token_program: Pubkey,
     pub associated_token_program: Pubkey,
     pub event_authority: Pubkey,
-    pub contra_escrow_program: Pubkey,
+    pub private_channel_escrow_program: Pubkey,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -108,7 +114,7 @@ pub struct ReleaseFundsAccounts {
     pub token_program: Pubkey,
     pub associated_token_program: Pubkey,
     pub event_authority: Pubkey,
-    pub contra_escrow_program: Pubkey,
+    pub private_channel_escrow_program: Pubkey,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -118,7 +124,7 @@ pub struct ResetSmtRootAccounts {
     pub instance: Pubkey,
     pub operator_pda: Pubkey,
     pub event_authority: Pubkey,
-    pub contra_escrow_program: Pubkey,
+    pub private_channel_escrow_program: Pubkey,
 }
 
 // ******************************************************************************************
@@ -195,10 +201,26 @@ pub struct AllowMintEvent {
     pub decimals: u8,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, BorshDeserialize)]
+pub struct DepositEvent {
+    pub amount: u64,
+}
+
 // ******************************************************************************************
 // Parse instructions
 // ******************************************************************************************
-/// Parse a single Contra Escrow instruction
+/// Return the `accounts.instance` carried by any escrow instruction variant.
+pub fn escrow_instance_of(ix: &EscrowInstruction) -> Pubkey {
+    match ix {
+        EscrowInstruction::CreateInstance { accounts, .. } => accounts.instance,
+        EscrowInstruction::AllowMint { accounts, .. } => accounts.instance,
+        EscrowInstruction::Deposit { accounts, .. } => accounts.instance,
+        EscrowInstruction::ReleaseFunds { accounts, .. } => accounts.instance,
+        EscrowInstruction::ResetSmtRoot { accounts, .. } => accounts.instance,
+    }
+}
+
+/// Parse a single PrivateChannel Escrow instruction
 pub fn parse_escrow_instruction(
     instruction: &CompiledInstruction,
     account_keys: &[Pubkey],
@@ -217,7 +239,7 @@ pub fn parse_escrow_instruction(
     match discriminator {
         CREATE_INSTANCE => parse_create_instance(ix_data, instruction, account_keys),
         ALLOW_MINT => parse_allow_mint(ix_data, instruction, account_keys, inner_instructions),
-        DEPOSIT => parse_deposit(ix_data, instruction, account_keys),
+        DEPOSIT => parse_deposit(ix_data, instruction, account_keys, inner_instructions),
         RELEASE_FUNDS => parse_release_funds(ix_data, instruction, account_keys),
         RESET_SMT_ROOT => parse_reset_smt_root(instruction, account_keys),
         _ => Ok(None), // Unsupported instruction type
@@ -248,12 +270,12 @@ fn parse_create_instance(
         instance: account_keys[instruction.accounts[3] as usize],
         system_program: account_keys[instruction.accounts[4] as usize],
         event_authority: account_keys[instruction.accounts[5] as usize],
-        contra_escrow_program: account_keys[instruction.accounts[6] as usize],
+        private_channel_escrow_program: account_keys[instruction.accounts[6] as usize],
     };
 
     Ok(Some(EscrowInstruction::CreateInstance {
         accounts,
-        data: CreateInstanceData { bump: ix_data.bump },
+        data: ix_data,
     }))
 }
 
@@ -286,7 +308,7 @@ fn parse_allow_mint(
         token_program: account_keys[instruction.accounts[7] as usize],
         associated_token_program: account_keys[instruction.accounts[8] as usize],
         event_authority: account_keys[instruction.accounts[9] as usize],
-        contra_escrow_program: account_keys[instruction.accounts[10] as usize],
+        private_channel_escrow_program: account_keys[instruction.accounts[10] as usize],
     };
 
     for inner_instruction_set in inner_instructions {
@@ -301,7 +323,7 @@ fn parse_allow_mint(
             {
                 return Ok(Some(EscrowInstruction::AllowMint {
                     accounts,
-                    data: AllowMintData { bump: ix_data.bump },
+                    data: ix_data,
                     event: AllowMintEvent {
                         decimals: event_data[EVENT_DECIMALS_INDEX],
                     },
@@ -320,6 +342,7 @@ fn parse_deposit(
     data: &[u8],
     instruction: &CompiledInstruction,
     account_keys: &[Pubkey],
+    inner_instructions: &[InnerInstructions],
 ) -> Result<Option<EscrowInstruction>, ParserError> {
     let ix_data = <DepositData as borsh::BorshDeserialize>::deserialize(&mut &data[..])?;
 
@@ -344,16 +367,39 @@ fn parse_deposit(
         token_program: account_keys[instruction.accounts[8] as usize],
         associated_token_program: account_keys[instruction.accounts[9] as usize],
         event_authority: account_keys[instruction.accounts[10] as usize],
-        contra_escrow_program: account_keys[instruction.accounts[11] as usize],
+        private_channel_escrow_program: account_keys[instruction.accounts[11] as usize],
     };
 
-    Ok(Some(EscrowInstruction::Deposit {
-        accounts,
-        data: DepositData {
-            amount: ix_data.amount,
-            recipient: ix_data.recipient,
-        },
-    }))
+    for inner_instruction_set in inner_instructions {
+        for inner_instruction in &inner_instruction_set.instructions {
+            let Ok(event_data) = bs58::decode(&inner_instruction.data).into_vec() else {
+                continue;
+            };
+
+            if event_data.len() >= 145
+                && event_data.starts_with(EVENT_IX_TAG_LE)
+                && event_data[EVENT_DISCRIMINATOR_INDEX] == DEPOSIT_EVENT_DISCRIMINATOR
+            {
+                // Safety: the `>= 145` guard above guarantees this slice is
+                // always exactly 8 bytes; the unwrap cannot panic.
+                let amount_bytes: [u8; 8] = event_data[EVENT_AMOUNT_INDEX..EVENT_AMOUNT_INDEX + 8]
+                    .try_into()
+                    .unwrap();
+
+                let amount = u64::from_le_bytes(amount_bytes);
+
+                return Ok(Some(EscrowInstruction::Deposit {
+                    accounts,
+                    data: ix_data,
+                    event: DepositEvent { amount },
+                }));
+            }
+        }
+    }
+
+    Err(ParserError::InstructionParseFailed {
+        reason: "No deposit event found".to_string(),
+    })
 }
 
 /// Parse ReleaseFunds instruction
@@ -385,17 +431,12 @@ fn parse_release_funds(
         token_program: account_keys[instruction.accounts[8] as usize],
         associated_token_program: account_keys[instruction.accounts[9] as usize],
         event_authority: account_keys[instruction.accounts[10] as usize],
-        contra_escrow_program: account_keys[instruction.accounts[11] as usize],
+        private_channel_escrow_program: account_keys[instruction.accounts[11] as usize],
     };
 
     Ok(Some(EscrowInstruction::ReleaseFunds {
         accounts,
-        data: ReleaseFundsData {
-            amount: ix_data.amount,
-            user: ix_data.user,
-            new_withdrawal_root: ix_data.new_withdrawal_root,
-            transaction_nonce: ix_data.transaction_nonce,
-        },
+        data: ix_data,
     }))
 }
 
@@ -419,7 +460,7 @@ fn parse_reset_smt_root(
         instance: account_keys[instruction.accounts[2] as usize],
         operator_pda: account_keys[instruction.accounts[3] as usize],
         event_authority: account_keys[instruction.accounts[4] as usize],
-        contra_escrow_program: account_keys[instruction.accounts[5] as usize],
+        private_channel_escrow_program: account_keys[instruction.accounts[5] as usize],
     };
 
     Ok(Some(EscrowInstruction::ResetSmtRoot { accounts }))
@@ -481,6 +522,29 @@ mod tests {
         data.extend_from_slice(&1000u64.to_le_bytes()); // amount
         data.push(0); // None for recipient (Option discriminator = 0)
         data
+    }
+
+    /// Build inner instructions carrying a valid DepositEvent CPI with the
+    /// given received `amount`. Layout: tag(8) + disc(1) + instance_seed(32)
+    /// + user(32) + amount(8 LE) + recipient(32) + mint(32) = 145 bytes.
+    fn create_deposit_inner_instructions(amount: u64) -> Vec<InnerInstructions> {
+        let mut data = vec![];
+        data.extend_from_slice(EVENT_IX_TAG_LE);
+        data.push(DEPOSIT_EVENT_DISCRIMINATOR);
+        data.extend_from_slice(&[0u8; 32]); // instance_seed
+        data.extend_from_slice(&[0u8; 32]); // user
+        data.extend_from_slice(&amount.to_le_bytes());
+        data.extend_from_slice(&[0u8; 32]); // recipient
+        data.extend_from_slice(&[0u8; 32]); // mint
+
+        vec![InnerInstructions {
+            index: 0,
+            instructions: vec![CompiledInstruction {
+                program_id_index: 0,
+                accounts: vec![],
+                data: bs58::encode(&data).into_string(),
+            }],
+        }]
     }
 
     /// Create minimal valid Borsh-encoded data for ReleaseFunds instruction
@@ -619,11 +683,21 @@ mod tests {
         let instruction = create_instruction_with_accounts(12, "dummy".to_string());
         let account_keys = create_n_account_keys(12);
 
-        let result = parse_deposit(&borsh_data, &instruction, &account_keys);
+        // data.amount = 1000 (caller-requested), event.amount = 990 (net received).
+        // Asserting on 990 proves the parser uses the event, not the instruction args.
+        let result = parse_deposit(
+            &borsh_data,
+            &instruction,
+            &account_keys,
+            &create_deposit_inner_instructions(990),
+        );
 
-        assert!(result.is_ok());
-        let parsed = result.unwrap();
-        assert!(parsed.is_some());
+        let parsed = result.unwrap().expect("Some");
+        if let EscrowInstruction::Deposit { event, .. } = parsed {
+            assert_eq!(event.amount, 990);
+        } else {
+            panic!("Expected Deposit instruction");
+        }
     }
 
     #[test]
@@ -632,11 +706,23 @@ mod tests {
         let instruction = create_instruction_with_accounts(11, "dummy".to_string()); // Only 11 accounts (need 12)
         let account_keys = create_n_account_keys(11);
 
-        let result = parse_deposit(&borsh_data, &instruction, &account_keys);
+        let result = parse_deposit(&borsh_data, &instruction, &account_keys, &[]);
 
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("Insufficient accounts"), "Error: {}", err);
+    }
+
+    #[test]
+    fn test_deposit_no_event_errs() {
+        let borsh_data = create_deposit_borsh_data();
+        let instruction = create_instruction_with_accounts(12, "dummy".to_string());
+        let account_keys = create_n_account_keys(12);
+
+        let result = parse_deposit(&borsh_data, &instruction, &account_keys, &[]);
+
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("No deposit event found"), "Error: {}", err);
     }
 
     // ============================================================================

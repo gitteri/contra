@@ -1,11 +1,12 @@
 #![allow(dead_code)]
 
-/// Transaction execution helpers for deposits and withdrawals
 use super::send_and_confirm_instructions;
 use super::test_types::{TransactionType, UserTransaction, BASE_AMOUNT, DEPOSITS_PER_USER};
 
-use contra_escrow_program_client::instructions::DepositBuilder;
-use contra_withdraw_program_client::instructions::{WithdrawFunds, WithdrawFundsInstructionArgs};
+use private_channel_escrow_program_client::instructions::DepositBuilder;
+use private_channel_withdraw_program_client::instructions::{
+    WithdrawFunds, WithdrawFundsInstructionArgs,
+};
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::{commitment_config::CommitmentConfig, pubkey::Pubkey, signature::Signer};
 use solana_system_interface::program::ID as SYSTEM_PROGRAM_ID;
@@ -13,7 +14,6 @@ use solana_transaction_status::UiTransactionEncoding;
 use spl_associated_token_account::get_associated_token_address_with_program_id;
 use spl_token::ID as TOKEN_PROGRAM_ID;
 
-/// Execute all deposit transactions for a single user
 pub async fn execute_user_deposits(
     client: &RpcClient,
     user_id: usize,
@@ -46,7 +46,9 @@ pub async fn execute_user_deposits(
             .token_program(TOKEN_PROGRAM_ID)
             .associated_token_program(spl_associated_token_account::ID)
             .event_authority(event_authority_pda)
-            .contra_escrow_program(contra_escrow_program_client::CONTRA_ESCROW_PROGRAM_ID)
+            .private_channel_escrow_program(
+                private_channel_escrow_program_client::PRIVATE_CHANNEL_ESCROW_PROGRAM_ID,
+            )
             .amount(amount)
             .instruction();
 
@@ -80,7 +82,6 @@ pub async fn execute_user_deposits(
     Ok(transactions)
 }
 
-/// Execute a withdrawal transaction for a single user
 pub async fn execute_user_withdrawal(
     client: &RpcClient,
     user: &solana_sdk::signer::keypair::Keypair,
@@ -128,7 +129,6 @@ pub async fn execute_user_withdrawal(
     })
 }
 
-/// Calculate total deposited amount for a user
 pub fn calculate_user_total_deposited(user_id: usize) -> u64 {
     (0..DEPOSITS_PER_USER)
         .map(|deposit_num| BASE_AMOUNT + (user_id as u64 * 1000) + deposit_num as u64)

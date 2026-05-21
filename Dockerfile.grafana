@@ -1,0 +1,11 @@
+# GRAFANA_VERSION comes from versions.env.
+# Standalone build (outside compose): see README "Building a single Dockerfile standalone".
+ARG GRAFANA_VERSION
+FROM grafana/grafana:${GRAFANA_VERSION}
+
+COPY monitoring/provisioning /etc/grafana/provisioning
+COPY monitoring/dashboards /var/lib/grafana/dashboards
+
+ENV GF_USERS_ALLOW_SIGN_UP=false
+ENV ALERT_WEBHOOK_URL=http://localhost:9/no-op
+ENV PROMETHEUS_URL=http://prometheus:9090

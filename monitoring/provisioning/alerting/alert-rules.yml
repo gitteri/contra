@@ -1,0 +1,186 @@
+apiVersion: 1
+groups:
+  - orgId: 1
+    name: indexer-lag-alerts
+    folder: Solana Private Channels Alerts
+    interval: 10s
+    rules:
+      - uid: indexer-lag-10s
+        title: "Indexer lag exceeds 10 seconds"
+        condition: C
+        for: 30s
+        noDataState: OK
+        execErrState: Error
+        annotations:
+          summary: "Indexer {{ $labels.program_type }} is {{ $values.A }} seconds behind chain tip"
+        labels:
+          severity: warning
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 60
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: (private_channel_indexer_chain_tip_slot - private_channel_indexer_current_slot) * 0.4
+              instant: true
+              refId: A
+          - refId: C
+            relativeTimeRange:
+              from: 0
+              to: 0
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [10]
+              refId: C
+
+  - orgId: 1
+    name: service-down-alerts
+    folder: Solana Private Channels Alerts
+    interval: 10s
+    rules:
+      - uid: service-down-scrape
+        title: "Solana Private Channels service down (scrape target unreachable)"
+        condition: C
+        for: 30s
+        noDataState: Alerting
+        execErrState: Error
+        annotations:
+          summary: "Service {{ $labels.job }} is down (Prometheus scrape failed)"
+        labels:
+          severity: critical
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 60
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: up{job=~"gateway|indexer-solana|indexer-private-channel|operator-solana|operator-private-channel"}
+              instant: true
+              refId: A
+          - refId: C
+            relativeTimeRange:
+              from: 0
+              to: 0
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    type: lt
+                    params: [1]
+              refId: C
+
+      - uid: service-down-probe
+        title: "Solana Private Channels service down (health probe failed)"
+        condition: C
+        for: 30s
+        noDataState: Alerting
+        execErrState: Error
+        annotations:
+          summary: "Service {{ $labels.instance }} is down (health check failed)"
+        labels:
+          severity: critical
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 60
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: probe_success{job="blackbox-http"}
+              instant: true
+              refId: A
+          - refId: C
+            relativeTimeRange:
+              from: 0
+              to: 0
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    type: lt
+                    params: [1]
+              refId: C
+
+  - orgId: 1
+    name: feepayer-alerts
+    folder: Solana Private Channels Alerts
+    interval: 1m
+    rules:
+      - uid: feepayer-warn-balance
+        title: "Feepayer SOL balance below 1.0 (warn)"
+        condition: C
+        for: 5m
+        noDataState: OK
+        execErrState: Error
+        annotations:
+          summary: "Feepayer {{ $labels.job }} ({{ $labels.program_type }}) balance is {{ $values.A }} SOL — schedule a top-up"
+        labels:
+          severity: warning
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 60
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: private_channel_feepayer_balance_lamports{job=~"operator-.*"} / 1e9
+              instant: true
+              refId: A
+          - refId: C
+            relativeTimeRange:
+              from: 0
+              to: 0
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    type: lt
+                    params: [1.0]
+              refId: C
+
+      - uid: feepayer-low-balance
+        title: "Feepayer SOL balance below 0.5"
+        condition: C
+        for: 1m
+        noDataState: OK
+        execErrState: Error
+        annotations:
+          summary: "Feepayer {{ $labels.job }} ({{ $labels.program_type }}) balance is {{ $values.A }} SOL — top up immediately"
+        labels:
+          severity: critical
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 60
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: private_channel_feepayer_balance_lamports{job=~"operator-.*"} / 1e9
+              instant: true
+              refId: A
+          - refId: C
+            relativeTimeRange:
+              from: 0
+              to: 0
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    type: lt
+                    params: [0.5]
+              refId: C

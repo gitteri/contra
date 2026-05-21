@@ -1,17 +1,17 @@
 <div align="center">
   <br />
-  <img src="./contra.svg" alt="Contra" width="140" />
+  <img src="./solana-private-channels.svg" alt="Solana Private Channels" width="140" />
   <br />
   <br />
 
-  <h3>Contra: Enterprise Infrastructure for Internet Capital Markets</h3>
+  <h3>Solana Private Channels: Enterprise Infrastructure for Internet Capital Markets</h3>
 
   <br />
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 </div>
 
-Contra is a payment channel with direct access to Solana Mainnet liquidity. Contra provides a complete infrastructure solution to execute thousands of transactions instantly with privacy, control and permissioning, while assets are readily accessible to and from Solana Mainnet.
+Solana Private Channels is a payment channel with direct access to Solana Mainnet liquidity. Solana Private Channels provides a complete infrastructure solution to execute thousands of transactions instantly with privacy, control and permissioning, while assets are readily accessible to and from Solana Mainnet.
 
 > ## ⚠️ SECURITY NOTICE
 >
@@ -23,28 +23,29 @@ Contra is a payment channel with direct access to Solana Mainnet liquidity. Cont
 
 ## Documentation
 
-- **[Architecture Overview](docs/ARCHITECTURE.md)** - Deep dive into Contra's technical architecture, components, and design decisions
+- **[All Documentation](docs/README.md)** — Architecture, program references, guides, and operational requirements
 
-## How Contra Works
+## How Solana Private Channels Works
 
-Contra operates as a payment channel with direct access to Solana Mainnet liquidity:
+Solana Private Channels operates as a payment channel with direct access to Solana Mainnet liquidity:
 
-- **Contra Channel**: Your private transaction batching system with direct Solana Mainnet access. Execute transactions with instant finality and full control over who participates and what rules apply.
-- **Contra Escrow Program**: Makes assets readily accessible to the payment channel. Users deposit SPL tokens. The program locks funds in escrow for use within the channel.
-- **Contra Withdrawal Program**: Withdrawals are initiated by sending tokens to the withdraw program inside the payment channel. The withdraw program burns the tokens and SPL tokens are released from the escrow program.
-- **Contra Indexer/Operator**: Monitors deposits and withdrawals, orchestrates state synchronization, and maintains an auditable record of all activity.
+- **Solana Private Channels Channel**: Your private transaction batching system with direct Solana Mainnet access. Execute transactions with instant finality and full control over who participates and what rules apply.
+- **Solana Private Channels Escrow Program**: Makes assets readily accessible to the payment channel. Users deposit SPL tokens. The program locks funds in escrow for use within the channel.
+- **Solana Private Channels Withdrawal Program**: Withdrawals are initiated by sending tokens to the withdraw program inside the payment channel. The withdraw program burns the tokens and SPL tokens are released from the escrow program.
+- **Solana Private Channels Indexer/Operator**: Monitors deposits and withdrawals, orchestrates state synchronization, and maintains an auditable record of all activity.
+- **Solana Private Channels Auth**: Optional authentication service. Issues signed JWTs for registered users and verified Solana wallets. When enabled, the gateway enforces RBAC — restricting account queries to wallets the caller owns and reserving operator-only methods (block/transaction fetching, transaction simulation) for elevated accounts.
 
 ### Case Study - Payments
 
 #### 1. Tokenized Deposit Issuance Flow
 
-This flow shows how a bank creates a token mint and issues tokenized deposits on Solana mainnet, initializes a Contra payment channel for transactions between bank customers [Alice and Bob].
+This flow shows how a bank creates a token mint and issues tokenized deposits on Solana mainnet, initializes a Solana Private Channels payment channel for transactions between bank customers [Alice and Bob].
 
 ```mermaid
 sequenceDiagram
     participant Bank
     participant Mainnet as Solana Mainnet
-    participant Channel as Contra Payment Channel
+    participant Channel as Solana Private Channels Payment Channel
     
     %% Setup Phase
     Note over Bank,Mainnet: SETUP
@@ -54,7 +55,7 @@ sequenceDiagram
     Bank->>Mainnet: Initialize Escrow for Payment Channel
     Mainnet-->>Bank: Escrow Instance Active
     
-    Bank->>Channel: Initialize Contra Payment Channel
+    Bank->>Channel: Initialize Solana Private Channels Payment Channel
     Channel-->>Bank: Channel Ready
     
     Bank->>Mainnet: Link Payment Channel to Escrow
@@ -88,7 +89,7 @@ This flow demonstrates a simple $1,000 transfer between bank customers Alice and
 sequenceDiagram
     participant Alice
     participant Bob
-    participant Channel as Contra Payment Channel
+    participant Channel as Solana Private Channels Payment Channel
     participant Bank
     
     %% Initial State
@@ -126,7 +127,7 @@ The flow shows two withdrawal methods that allow Bob to withdraw while preservin
 ```mermaid
 sequenceDiagram
     participant Bob
-    participant Channel as Contra Payment Channel
+    participant Channel as Solana Private Channels Payment Channel
     participant Bank
     participant Mainnet as Solana Mainnet
     participant BobWallet as Bob's Wallet
@@ -175,10 +176,10 @@ Within the payment channel, transactions are processed through a **five-stage pi
    - **GaslessCallback**: Synthesizes fee payer accounts on-demand (zero operational overhead)
 5. **Settler**: Batches results every 100ms and commits to PostgreSQL/Redis with atomic writes
 
-### Contra Escrow/Withdrawal Programs
+### Solana Private Channels Escrow/Withdrawal Programs
 
-- **Contra Escrow Program**: Mainnet token custody with SMT security (Program ID: `GokvZqD2yP696rzNBNbQvcZ4VsLW7jNvFXU1kW9m7k83`)
-- **Contra Withdrawal Program**: Channel withdrawal processing (token burning) (Program ID: `J231K9UEpS4y4KAPwGc4gsMNCjKFRMYcQBcjVW7vBhVi`)
+- **Solana Private Channels Escrow Program**: Mainnet token custody with SMT security (Program ID: `GokvZqD2yP696rzNBNbQvcZ4VsLW7jNvFXU1kW9m7k83`)
+- **Solana Private Channels Withdrawal Program**: Channel withdrawal processing (token burning) (Program ID: `J231K9UEpS4y4KAPwGc4gsMNCjKFRMYcQBcjVW7vBhVi`)
 
 ### Indexer
 
@@ -191,12 +192,12 @@ Both strategies parse Escrow/Withdraw Program instructions and write to PostgreS
 
 ## Quick Start
 
-Get Contra running locally in under 5 minutes:
+Get Solana Private Channels running locally in under 5 minutes:
 
 ```bash
 # Clone repository
-git clone https://github.com/solana-foundation/contra.git
-cd contra
+git clone https://github.com/solana-foundation/solana-private-channels.git
+cd private_channel
 
 # Install dependencies
 make install
@@ -212,8 +213,8 @@ make all-test
 
 ### Prerequisites
 
-- [**Rust**](https://rust-lang.org/tools/install/): 1.75+ (stable)
-- [**Solana CLI**](https://solana.com/docs/intro/installation): 2.2.19 (for programs), 2.3.9 (for using Yellowstone)
+- [**Rust**](https://rust-lang.org/tools/install/): 1.91 (pinned via `rust-toolchain.toml`; install [rustup](https://rustup.rs) and it will fetch the right channel automatically)
+- [**Solana CLI**](https://solana.com/docs/intro/installation): version pinned in [`versions.env`](versions.env). Run `make install-toolchain` to install/verify. Do not install a specific version by hand — `versions.env` is the source of truth for every Dockerfile, the Yellowstone Geyser plugin build, and CI.
 - [**Docker**](https://docs.docker.com/get-docker/): 26.0+ with Docker Compose
 - [**pnpm**](https://pnpm.io/installation): 10.0+ (for TypeScript clients)
 
@@ -221,11 +222,12 @@ make all-test
 
 | Component | Path | Description |
 |-----------|------|-------------|
-| **Contra Core** | [core/](core/) | Payment channel transaction pipeline |
-| **Contra DB** | [core/src/accounts/](core/src/accounts/) | Accounts database with multi-backend support |
-| **Gateway** | [gateway/](gateway/) | Read/write node routing service |
-| **Escrow Program** | [contra-escrow-program/](contra-escrow-program/) | Mainnet token deposit via escrow |
-| **Withdrawal Program** | [contra-withdraw-program/](contra-withdraw-program/) | Channel token withdrawal via burning |
+| **Solana Private Channels Core** | [core/](core/) | Payment channel transaction pipeline |
+| **Solana Private Channels DB** | [core/src/accounts/](core/src/accounts/) | Accounts database with multi-backend support |
+| **Gateway** | [gateway/](gateway/) | Read/write node routing service with optional RBAC enforcement |
+| **Auth** | [auth/](auth/) | Authentication service — user registration, login, wallet verification, JWT issuance |
+| **Escrow Program** | [private-channel-escrow-program/](private-channel-escrow-program/) | Mainnet token deposit via escrow |
+| **Withdrawal Program** | [private-channel-withdraw-program/](private-channel-withdraw-program/) | Channel token withdrawal via burning |
 | **Indexer + Operator** | [indexer/](indexer/) | Mainnet & channel transaction monitoring & automation |
 | **Integration Tests** | [integration/](integration/) | Cross-workspace integration tests |
 | **Deployment** | [docker-compose.yml](docker-compose.yml) | Full stack deployment configuration |
@@ -242,6 +244,36 @@ make install
 make build
 ```
 
+### Docker build cache
+
+Docker builds use BuildKit cache mounts for cargo and apt, so rebuilds after the first cold build are fast. One-time setup on a fresh host: `sudo make install-buildkit-cache` merges a BuildKit GC fragment into `/etc/docker/daemon.json` so the cache stays capped (~50 GB) instead of growing unbounded. The `make docker-build`, `make docker-up`, and `make docker-rebuild` targets (and devnet variants) check for this and fail with an actionable message if it's missing.
+
+Useful commands:
+
+```bash
+# Force a fresh build (ignore all caches)
+docker compose build --no-cache <service>
+
+# Reclaim disk by clearing the build cache
+docker builder prune -af
+```
+
+### Building a single Dockerfile standalone
+
+Compose loads [`versions.env`](versions.env) automatically; standalone `docker build` doesn't. Source the file first so the build args are available, then pass only the args that the Dockerfile declares:
+
+```bash
+set -a; . versions.env; set +a
+
+docker build --build-arg SOLANA_VERSION --build-arg PNPM_VERSION -f Dockerfile .
+docker build --build-arg SOLANA_VERSION --build-arg YELLOWSTONE_TAG -f validator.Dockerfile .
+docker build --build-arg GRAFANA_VERSION    -f Dockerfile.grafana    .
+docker build --build-arg PROMETHEUS_VERSION -f Dockerfile.prometheus .
+docker build --build-arg NODE_VERSION --build-arg PNPM_VERSION -f admin-ui/Dockerfile .
+```
+
+`versions.env` is the single source of truth for every pinned version.
+
 ### Run Tests
 
 ```bash
@@ -254,6 +286,82 @@ make unit-test
 # Run integration tests only
 make integration-test
 ```
+
+### Docker stack
+
+The Makefile wraps the full compose stack so you don't have to remember the `--env-file` chain. Precondition: copy the env template once (`cp .env.example .env.local`) and fill in any secrets.
+
+```bash
+# Build all images
+make docker-build
+
+# Start the full stack in the background
+make docker-up
+
+# Rebuild changed services and restart
+make docker-rebuild
+
+# Tail logs / inspect / stop
+make docker-logs
+make docker-ps
+make docker-down
+```
+
+Devnet variants exist for every target (`make docker-devnet-up`, `make docker-devnet-down`, etc.) and read `.env.devnet` instead. Run `make help` for the full list.
+
+### Running with Auth (RBAC)
+
+Auth is opt-in. The gateway runs without it by default — all RPC methods are accessible without a token.
+
+To enable auth, set `JWT_SECRET` in your `.env.local` and start with the `auth` profile:
+
+```bash
+# Copy and configure env
+cp .env.example .env.local
+# Set JWT_SECRET=<your-secret> in .env.local
+
+# Start full stack including auth service
+docker compose --env-file versions.env --env-file .env.local --profile auth up
+```
+
+Once running, the auth service is available at `http://localhost:${AUTH_PORT}` (default `8903`). See [auth/README.md](auth/README.md) for the full API reference, role definitions, and wallet verification flow.
+
+## Pinned tooling versions
+
+CI pins the following tool versions. Local development environments should
+match these to keep coverage reports and test behavior reproducible between
+CI and local runs.
+
+| Tool             | Version    | Install command                                        |
+|------------------|------------|--------------------------------------------------------|
+| Rust toolchain   | `1.91.0`   | Pinned in `rust-toolchain.toml` — `rustup` picks it up automatically (host *and* Docker builder) |
+| cargo-llvm-cov   | `0.8.4`    | `cargo install cargo-llvm-cov@0.8.4`                   |
+| cargo-nextest    | `0.9.130`  | `cargo install cargo-nextest@0.9.130 --locked`         |
+| Solana CLI       | `3.1.13`   | Pinned in [`versions.env`](versions.env); run `make install-toolchain` to install/verify |
+| Node.js          | `24.7.0`   | Pinned in [`versions.env`](versions.env) (`NODE_VERSION`) for admin-ui Docker builds |
+| pnpm             | `10.15.1`  | Pinned in [`versions.env`](versions.env) (`PNPM_VERSION`); also via `packageManager` in each `package.json` |
+| Grafana          | `11.4.0`   | Pinned in [`versions.env`](versions.env) (`GRAFANA_VERSION`) |
+| Prometheus       | `v3.0.1`   | Pinned in [`versions.env`](versions.env) (`PROMETHEUS_VERSION`) |
+| Blackbox exporter| `v0.25.0`  | Pinned in [`versions.env`](versions.env) (`BLACKBOX_VERSION`) |
+
+Container images used by integration tests (pulled automatically by
+`testcontainers` at test time):
+
+| Image                | Notes                                          |
+|----------------------|------------------------------------------------|
+| `postgres:11-alpine` | Default of `testcontainers-modules 0.13`.      |
+| `redis:7`            | Warmed in CI before each integration run.      |
+
+Source of truth for tool versions:
+- **[`versions.env`](versions.env)** (consumed by Dockerfiles, `docker compose`, and `make install-toolchain` / `check-toolchain`): `SOLANA_VERSION`, `YELLOWSTONE_TAG`, `PNPM_VERSION`, `NODE_VERSION`, `GRAFANA_VERSION`, `PROMETHEUS_VERSION`, `BLACKBOX_VERSION`
+- Rust toolchain: [`rust-toolchain.toml`](rust-toolchain.toml)
+- Rust + `cargo-llvm-cov`: [`.github/actions/setup-environment/action.yml`](.github/actions/setup-environment/action.yml)
+- `cargo-nextest`: [`.github/workflows/rust.yml`](.github/workflows/rust.yml) (`Install cargo-nextest` step)
+- Solana CLI (CI mirror of `versions.env`): [`.github/actions/setup-solana/action.yml`](.github/actions/setup-solana/action.yml)
+- pnpm (also): `packageManager` field in each `package.json`
+
+When bumping any version, update the CI config **and** this section in the
+same PR so the two stay in sync.
 
 ## License
 

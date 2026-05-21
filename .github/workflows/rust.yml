@@ -2,30 +2,177 @@ name: Rust Checks
 
 on:
   push:
-    branches: [main]
+    branches: [main, hardening/pre-release-audit]
   pull_request:
-    branches: [main]
+    branches: [main, hardening/pre-release-audit]
+
+permissions:
+  contents: read
+  pull-requests: write
+  actions: read
 
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
+concurrency:
+  group: rust-checks-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  check:
-    name: Check
-    runs-on: contra-runner-1
+  init-coverage-table:
+    name: Initialize Coverage Table
+    if: github.event_name == 'pull_request'
+    runs-on: private-channel-runner-1
+    steps:
+      - name: Insert coverage skeleton into PR body
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const repo = context.repo;
+            const prNumber = context.payload.pull_request?.number;
+            if (!prNumber) return;
+
+            const { data: pr } = await github.rest.pulls.get({
+              ...repo,
+              pull_number: prNumber,
+            });
+
+            if (pr.body && pr.body.includes('### Coverage Report')) {
+              console.log('Coverage table already exists, skipping');
+              return;
+            }
+
+            const skeleton = [
+              '',
+              '### Coverage Report',
+              '',
+              '| Component | Lines Hit | Lines Total | Coverage | Artifact |',
+              '|-----------|-----------|-------------|----------|----------|',
+              '| Core | - | - | - | - |',
+              '| Indexer | - | - | - | - |',
+              '| Gateway | - | - | - | - |',
+              '| Auth | - | - | - | - |',
+              '| Withdraw Program | - | - | - | - |',
+              '| Escrow Program | - | - | - | - |',
+              '| DvP Swap Program | - | - | - | - |',
+              '| E2E Integration | - | - | - | - |',
+              '| **Total** | **-** | **-** | **-** | |',
+              '',
+              '> Coverage runs in progress...',
+            ].join('\n');
+
+            const body = (pr.body || '') + skeleton;
+            await github.rest.pulls.update({
+              ...repo,
+              pull_number: prNumber,
+              body,
+            });
+            console.log(`Inserted coverage skeleton into PR #${prNumber}`);
+
+  changes:
+    name: Detect Changed Areas
+    runs-on: private-channel-runner-1
+    outputs:
+      rust_checks: ${{ steps.filter.outputs.rust_checks }}
+      integration: ${{ steps.filter.outputs.integration }}
+      core_indexer: ${{ steps.filter.outputs.core_indexer }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect changed files
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            rust_checks:
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - 'Makefile'
+              - '.github/workflows/rust.yml'
+              - '.github/actions/setup-environment/**'
+              - '.github/actions/setup-solana/**'
+              - 'core/**'
+              - 'indexer/**'
+              - 'integration/**'
+              - 'test_utils/**'
+              - 'private-channel-escrow-program/**'
+              - 'private-channel-withdraw-program/**'
+              - 'dvp-swap-program/**'
+              - 'auth/**'
+            integration:
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'Makefile'
+              - '.github/workflows/rust.yml'
+              - '.github/actions/setup-environment/**'
+              - '.github/actions/setup-solana/**'
+              - 'core/**'
+              - 'indexer/**'
+              - 'integration/**'
+              - 'test_utils/**'
+              - 'private-channel-escrow-program/**'
+              - 'private-channel-withdraw-program/**'
+              - 'dvp-swap-program/**'
+            core_indexer:
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'Makefile'
+              - '.github/workflows/rust.yml'
+              - '.github/actions/setup-environment/**'
+              - 'core/**'
+              - 'indexer/**'
+              - 'gateway/**'
+              - 'auth/**'
+
+  build-artifacts:
+    name: Build Shared Artifacts
+    needs: changes
+    if: needs.changes.outputs.integration == 'true' || needs.changes.outputs.core_indexer == 'true'
+    runs-on: private-channel-runner-1
     steps:
       - uses: actions/checkout@v4
 
       - name: Setup environment
         uses: ./.github/actions/setup-environment
+        with:
+          build-programs: "false"
 
-      - name: Run cargo check
-        run: cargo check --all-features
+      - name: Build programs and generate clients
+        run: |
+          make -C private-channel-escrow-program build
+          make -C private-channel-withdraw-program build
+          make -C dvp-swap-program build
 
-  fmt:
-    name: Format
-    runs-on: contra-runner-1
+      - name: Package shared artifacts
+        run: |
+          tar -czf ci-build-artifacts.tgz \
+            target/deploy/private_channel_escrow_program.so \
+            target/deploy/private_channel_withdraw_program.so \
+            target/deploy/dvp_swap_program.so \
+            target/deploy/transfer_hook_fixture.so \
+            private-channel-escrow-program/idl \
+            private-channel-escrow-program/clients \
+            private-channel-withdraw-program/idl \
+            private-channel-withdraw-program/clients \
+            dvp-swap-program/idl \
+            dvp-swap-program/clients
+
+      - name: Upload shared artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-build-artifacts
+          path: ci-build-artifacts.tgz
+          retention-days: 1
+
+  check:
+    name: Check
+    needs: changes
+    if: needs.changes.outputs.rust_checks == 'true'
+    runs-on: private-channel-runner-1
     steps:
       - uses: actions/checkout@v4
 
@@ -33,44 +180,241 @@ jobs:
         uses: ./.github/actions/setup-environment
         with:
           rust-components: rustfmt
+          setup-solana: "false"
+          build-programs: "false"
 
-      - name: Check formatting
-        run: cargo fmt -- --check
+      - name: Create program placeholder for type checking
+        run: |
+          mkdir -p target/deploy
+          touch target/deploy/private_channel_withdraw_program.so
+          touch target/deploy/dvp_swap_program.so
+          touch target/deploy/transfer_hook_fixture.so
 
-  clippy:
-    name: Clippy
-    runs-on: contra-runner-1
+      - name: Generate clients
+        run: make generate-clients
+
+      - name: Run cargo check
+        run: |
+          cargo check --workspace --all-features \
+            --exclude private-channel-core \
+            --exclude private-channel-integration \
+            --exclude tests-private-channel-escrow-program \
+            --exclude tests-private-channel-withdraw-program \
+            --exclude tests-dvp-swap-program
+
+  fmt:
+    name: Format
+    needs: changes
+    if: needs.changes.outputs.rust_checks == 'true'
+    runs-on: private-channel-runner-1
     steps:
       - uses: actions/checkout@v4
 
       - name: Setup environment
         uses: ./.github/actions/setup-environment
         with:
-          rust-components: clippy
+          install-base-cargo-tools: "false"
+          install-system-dependencies: "false"
+          setup-solana: "false"
+          build-programs: "false"
+          rust-components: rustfmt
+
+      - name: Check formatting
+        run: |
+          cargo fmt \
+            -p private-channel-escrow-program \
+            -p tests-private-channel-escrow-program \
+            -p private-channel-withdraw-program \
+            -p tests-private-channel-withdraw-program \
+            -p dvp-swap-program \
+            -p tests-dvp-swap-program \
+            -p private-channel-core \
+            -p private-channel-gateway \
+            -p private-channel-indexer \
+            -p private-channel-integration \
+            -p test_utils \
+            -p devnet-scripts \
+            -p auth \
+            -- --check
+
+  clippy:
+    name: Clippy
+    needs: changes
+    if: needs.changes.outputs.rust_checks == 'true'
+    runs-on: private-channel-runner-1
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup environment
+        uses: ./.github/actions/setup-environment
+        with:
+          rust-components: clippy,rustfmt
+          setup-solana: "false"
+          build-programs: "false"
+
+      - name: Create program placeholder for type checking
+        run: |
+          mkdir -p target/deploy
+          touch target/deploy/private_channel_withdraw_program.so
+          touch target/deploy/dvp_swap_program.so
+          touch target/deploy/transfer_hook_fixture.so
+
+      - name: Generate clients
+        run: make generate-clients
 
       - name: Run clippy
-        run: cargo clippy --all-features -- -D warnings
+        run: |
+          cargo clippy --workspace --all-features \
+            --exclude private-channel-core \
+            --exclude private-channel-integration \
+            --exclude tests-private-channel-escrow-program \
+            --exclude tests-private-channel-withdraw-program \
+            --exclude tests-dvp-swap-program \
+            -- -D warnings
 
-  integration-test:
-    name: Integration Tests
-    runs-on: contra-runner-1
+  integration-tests:
+    name: Rust Integration Tests + E2E Coverage
+    needs: [changes, build-artifacts]
+    if: needs.changes.outputs.integration == 'true'
+    runs-on: private-channel-runner-1
     steps:
       - uses: actions/checkout@v4
 
       - name: Setup environment
         uses: ./.github/actions/setup-environment
+        with:
+          rust-components: llvm-tools-preview
+          setup-node: "false"
+          setup-pnpm: "false"
+          install-dependencies: "false"
+          build-programs: "false"
 
-      - name: Run integration tests
-        run: make integration-test
+      - name: Download shared artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: ci-build-artifacts
+
+      - name: Restore shared artifacts
+        run: tar -xzf ci-build-artifacts.tgz
+
+      - name: Warm testcontainers images
+        run: |
+          docker image inspect postgres:11-alpine >/dev/null 2>&1 || docker pull postgres:11-alpine
+          docker image inspect redis:7 >/dev/null 2>&1 || docker pull redis:7
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.130
+
+      - name: Run Solana Private Channels integration tests with coverage
+        run: make -C integration integration-coverage-private-channel
+
+      - name: Run Redis-backend coverage tests
+        run: make -C integration integration-coverage-private-channel-redis
+
+      - name: Build escrow with test-tree for indexer tests
+        run: make -C private-channel-escrow-program build-test
+
+      - name: Run indexer integration tests with coverage
+        run: make -C integration integration-coverage-indexer
+
+      - name: Run reconciliation e2e tests
+        run: cd indexer && cargo test --test reconciliation_e2e_test -- --nocapture
+
+      - name: Generate combined E2E coverage report
+        run: make -C integration integration-coverage-report
+
+      - name: Upload E2E coverage reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-coverage-reports
+          path: coverage/coverage-integration-e2e.lcov
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Update PR coverage — E2E Integration
+        if: github.event_name == 'pull_request'
+        uses: ./.github/actions/update-coverage-row
+        with:
+          component: E2E Integration
+          lcov-file: coverage/coverage-integration-e2e.lcov
+          artifact-name: e2e-coverage-reports
+          github-token: ${{ secrets.GITHUB_TOKEN }}
 
   unit-tests:
-    name: Indexer Unit Tests
-    runs-on: contra-runner-1
+    name: Core + Indexer Unit Coverage
+    needs: [changes, build-artifacts]
+    if: needs.changes.outputs.core_indexer == 'true'
+    runs-on: private-channel-runner-1
     steps:
       - uses: actions/checkout@v4
 
       - name: Setup environment
         uses: ./.github/actions/setup-environment
+        with:
+          setup-node: "false"
+          setup-pnpm: "false"
+          install-dependencies: "false"
+          rust-components: rustfmt,llvm-tools-preview
+          setup-solana: "false"
+          build-programs: "false"
 
-      - name: Run indexer unit tests (yellowstone)
-        run: make unit-test
+      - name: Download shared artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: ci-build-artifacts
+
+      - name: Restore shared artifacts
+        run: tar -xzf ci-build-artifacts.tgz
+
+      - name: Run core + indexer unit tests with coverage
+        run: make ci-unit-coverage
+
+      - name: Upload coverage reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-unit-coverage-reports
+          path: |
+            coverage/coverage-core-unit.lcov
+            coverage/coverage-indexer-unit.lcov
+            coverage/coverage-gateway-unit.lcov
+            coverage/coverage-auth-unit.lcov
+          retention-days: 7
+
+      - name: Update PR coverage — Core
+        if: github.event_name == 'pull_request'
+        uses: ./.github/actions/update-coverage-row
+        with:
+          component: Core
+          lcov-file: coverage/coverage-core-unit.lcov
+          artifact-name: rust-unit-coverage-reports
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update PR coverage — Indexer
+        if: github.event_name == 'pull_request'
+        uses: ./.github/actions/update-coverage-row
+        with:
+          component: Indexer
+          lcov-file: coverage/coverage-indexer-unit.lcov
+          artifact-name: rust-unit-coverage-reports
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update PR coverage — Gateway
+        if: github.event_name == 'pull_request'
+        uses: ./.github/actions/update-coverage-row
+        with:
+          component: Gateway
+          lcov-file: coverage/coverage-gateway-unit.lcov
+          artifact-name: rust-unit-coverage-reports
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update PR coverage — Auth
+        if: github.event_name == 'pull_request'
+        uses: ./.github/actions/update-coverage-row
+        with:
+          component: Auth
+          lcov-file: coverage/coverage-auth-unit.lcov
+          artifact-name: rust-unit-coverage-reports
+          github-token: ${{ secrets.GITHUB_TOKEN }}

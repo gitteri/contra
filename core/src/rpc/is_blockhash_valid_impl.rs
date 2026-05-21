@@ -1,4 +1,7 @@
-use crate::rpc::{error::custom_error, ReadDeps};
+use crate::rpc::{
+    error::{custom_error, INVALID_PARAMS_CODE, JSON_RPC_SERVER_ERROR},
+    ReadDeps,
+};
 use jsonrpsee::core::RpcResult;
 use solana_rpc_client_types::config::RpcContextConfig;
 use solana_rpc_client_types::response::{Response, RpcResponseContext};
@@ -15,23 +18,26 @@ pub async fn is_blockhash_valid_impl(
         .accounts_db
         .get_latest_slot()
         .await
-        .map_err(|e| custom_error(-32000, format!("Failed to get slot: {}", e)))?;
+        .map_err(|e| custom_error(JSON_RPC_SERVER_ERROR, format!("Failed to get slot: {}", e)))?
+        .unwrap_or(0);
 
     // Parse the provided blockhash
     let provided_hash = Hash::from_str(&blockhash)
-        .map_err(|e| custom_error(-32602, format!("Invalid blockhash: {}", e)))?;
+        .map_err(|e| custom_error(INVALID_PARAMS_CODE, format!("Invalid blockhash: {}", e)))?;
 
-    // Get the latest blockhash
-    let latest_hash = read_deps
-        .accounts_db
-        .get_latest_blockhash()
-        .await
-        .map_err(|e| custom_error(-32000, format!("Failed to get blockhash: {}", e)))?;
+    // Check if the blockhash is in the live blockhash window.
+    // Validates against the full window maintained by the Dedup stage,
+    // not just the single latest blockhash.
+    //
+    // Edge cases:
+    // - Empty window: iter().any() returns false (all blockhashes rejected at startup)
+    // - Lock poisoning: handled with map_err instead of unwrap()
+    let live_blockhashes = read_deps
+        .live_blockhashes
+        .read()
+        .map_err(|e| custom_error(-32603, format!("Failed to acquire blockhash lock: {}", e)))?;
 
-    // Check if the blockhash matches the latest one
-    // In a production system, you'd want to check a range of recent blockhashes
-    // but for now we'll just check the latest one
-    let is_valid = provided_hash == latest_hash;
+    let is_valid = live_blockhashes.iter().any(|h| h == &provided_hash);
 
     Ok(Response {
         context: RpcResponseContext::new(slot),

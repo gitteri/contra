@@ -2,12 +2,13 @@ use {
     jsonrpsee::{core::RpcResult, proc_macros::rpc},
     serde_json::Value,
     solana_account_decoder_client_types::{token::UiTokenAmount, UiAccount},
+    solana_rpc_client_api::response::RpcConfirmedTransactionStatusWithSignature,
     solana_rpc_client_types::{
         config::{
             RpcAccountInfoConfig, RpcBlockConfig, RpcContextConfig, RpcEncodingConfigWrapper,
             RpcEpochConfig, RpcGetVoteAccountsConfig, RpcSendTransactionConfig,
-            RpcSignatureStatusConfig, RpcSimulateTransactionConfig, RpcSupplyConfig,
-            RpcTransactionConfig,
+            RpcSignatureStatusConfig, RpcSignaturesForAddressConfig, RpcSimulateTransactionConfig,
+            RpcSupplyConfig, RpcTransactionConfig,
         },
         response::{
             Response, RpcBlockhash, RpcBlockhashFeeCalculator, RpcPerfSample,
@@ -21,9 +22,9 @@ use {
 pub use solana_epoch_info::EpochInfo;
 pub use solana_epoch_schedule::EpochSchedule;
 
-/// The main RPC API trait for Contra
+/// The main RPC API trait for PrivateChannel
 #[rpc(server)]
-pub trait ContraRpc {
+pub trait PrivateChannelRpc {
     /// Send a transaction to the network
     #[method(name = "sendTransaction")]
     async fn send_transaction(
@@ -145,6 +146,14 @@ pub trait ContraRpc {
         blockhash: String,
         config: Option<RpcContextConfig>,
     ) -> RpcResult<Response<bool>>;
+
+    /// Get signatures for a given address
+    #[method(name = "getSignaturesForAddress")]
+    async fn get_signatures_for_address(
+        &self,
+        address: String,
+        config: Option<RpcSignaturesForAddressConfig>,
+    ) -> RpcResult<Vec<RpcConfirmedTransactionStatusWithSignature>>;
 
     /// Simulate a transaction
     #[method(name = "simulateTransaction")]

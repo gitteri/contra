@@ -1,11 +1,13 @@
 use clap::{Parser, Subcommand};
-use contra_indexer::{
-    BackfillConfig, ContraIndexerConfig, DatasourceType, IndexerConfig, OperatorConfig,
-    PostgresConfig, ProgramType, RpcPollingConfig, StorageType, YellowstoneConfig,
-};
 use figment::{
     providers::{Env, Format, Toml},
     Figment,
+};
+use private_channel_indexer::config::DEFAULT_CONFIRMATION_POLL_INTERVAL_MS;
+use private_channel_indexer::{
+    BackfillConfig, DatasourceType, IndexerConfig, OperatorConfig, PostgresConfig,
+    PrivateChannelIndexerConfig, ProgramType, ReconciliationConfig, RpcPollingConfig, StorageType,
+    YellowstoneConfig,
 };
 use serde::Deserialize;
 use solana_sdk::{commitment_config::CommitmentLevel, pubkey::Pubkey};
@@ -33,12 +35,20 @@ struct StorageSection {
     max_connections: u32,
 }
 
+#[derive(Deserialize, Default)]
+struct ReconciliationSection {
+    #[serde(default)]
+    mismatch_threshold_raw: u64,
+}
+
 #[derive(Deserialize)]
 struct IndexerSection {
     datasource_type: DatasourceType,
     rpc_polling: Option<RpcPollingSection>,
     yellowstone: Option<YellowstoneSection>,
     backfill: BackfillSection,
+    #[serde(default)]
+    reconciliation: ReconciliationSection,
 }
 
 #[derive(Deserialize)]
@@ -79,17 +89,46 @@ struct OperatorSection {
     channel_buffer_size: usize,
     #[serde(default)]
     rpc_commitment: Option<CommitmentLevel>,
+    #[serde(default = "default_reconciliation_interval_secs")]
+    reconciliation_interval_secs: u64,
+    #[serde(default = "default_reconciliation_tolerance_bps")]
+    reconciliation_tolerance_bps: u16,
+    #[serde(default)]
+    reconciliation_webhook_url: Option<String>,
+    #[serde(default = "default_feepayer_monitor_interval_secs")]
+    feepayer_monitor_interval_secs: u64,
+    #[serde(default = "default_confirmation_poll_interval_ms")]
+    confirmation_poll_interval_ms: u64,
+}
+
+fn default_reconciliation_interval_secs() -> u64 {
+    5 * 60
+}
+
+fn default_reconciliation_tolerance_bps() -> u16 {
+    10
+}
+
+fn default_feepayer_monitor_interval_secs() -> u64 {
+    60
+}
+
+fn default_confirmation_poll_interval_ms() -> u64 {
+    DEFAULT_CONFIRMATION_POLL_INTERVAL_MS
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "contra-indexer", about = "Index data from Contra programs")]
+#[command(
+    name = "private-channel-indexer",
+    about = "Index data from PrivateChannel programs"
+)]
 struct Args {
     /// Path to configuration file
-    #[arg(short = 'c', long = "config", env = "CONTRA_INDEXER_CONFIG")]
+    #[arg(short = 'c', long = "config", env = "PRIVATE_CHANNEL_INDEXER_CONFIG")]
     config: PathBuf,
 
     /// Enable verbose logging
-    #[arg(short = 'v', long, env = "CONTRA_INDEXER_VERBOSE")]
+    #[arg(short = 'v', long, env = "PRIVATE_CHANNEL_INDEXER_VERBOSE")]
     verbose: bool,
 
     #[command(subcommand)]
@@ -102,6 +141,12 @@ enum Mode {
     Indexer,
     /// Run as an operator
     Operator,
+    /// Run as a resync operation
+    Resync {
+        /// Genesis slot to start from (default: 0)
+        #[arg(long, default_value = "0")]
+        genesis_slot: u64,
+    },
 }
 
 const INDEXER_PREFIX: &str = "INDEXER";
@@ -131,6 +176,8 @@ fn map_env_to_config_path(
                 format!("indexer.rpc_polling.{}", suffix)
             } else if let Some(suffix) = key_lower.strip_prefix("backfill_") {
                 format!("indexer.backfill.{}", suffix)
+            } else if let Some(suffix) = key_lower.strip_prefix("reconciliation_") {
+                format!("indexer.reconciliation.{}", suffix)
             } else {
                 format!("indexer.{}", key_lower)
             }
@@ -160,19 +207,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match args.mode {
         Mode::Indexer => run_indexer(figment, args.verbose).await,
         Mode::Operator => run_operator(figment, args.verbose).await,
+        Mode::Resync { genesis_slot } => run_resync(figment, args.verbose, genesis_slot).await,
     }
 }
 
 async fn run_indexer(figment: Figment, verbose: bool) -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_env_filter(if verbose {
-            "info,contra_indexer=debug"
+            "info,private_channel_indexer=debug"
         } else {
             "info"
         })
         .init();
 
+    let metrics_port = std::env::var("METRICS_PORT")
+        .ok()
+        .and_then(|p| p.parse::<u16>().ok())
+        .unwrap_or(9100);
+    private_channel_indexer::metrics::init();
+    let health =
+        private_channel_metrics::HealthState::new(private_channel_metrics::HealthConfig::indexer());
+    private_channel_metrics::start_metrics_server_with_health(metrics_port, health.clone());
+
     let common: CommonSection = figment.extract_inner("common")?;
+    private_channel_indexer::metrics::init_labels(private_channel_metrics::MetricLabel::as_label(
+        &common.program_type,
+    ));
     let storage: StorageSection = figment.extract_inner("storage")?;
     let indexer: IndexerSection = figment.extract_inner("indexer")?;
 
@@ -251,7 +311,7 @@ async fn run_indexer(figment: Figment, verbose: bool) -> Result<(), Box<dyn std:
         })
         .transpose()?;
 
-    let common_config = ContraIndexerConfig {
+    let common_config = PrivateChannelIndexerConfig {
         program_type: common.program_type,
         storage_type: storage.storage_type,
         postgres: postgres_config,
@@ -260,17 +320,22 @@ async fn run_indexer(figment: Figment, verbose: bool) -> Result<(), Box<dyn std:
         escrow_instance_id,
     };
 
+    let reconciliation_config = ReconciliationConfig {
+        mismatch_threshold_raw: indexer.reconciliation.mismatch_threshold_raw,
+    };
+
     let indexer_config = IndexerConfig {
         datasource_type: indexer.datasource_type,
         rpc_polling: rpc_polling_config,
         yellowstone: yellowstone_config,
         backfill: backfill_config,
+        reconciliation: reconciliation_config,
     };
 
     common_config.validate()?;
     indexer_config.validate()?;
 
-    contra_indexer::run(common_config, indexer_config).await?;
+    private_channel_indexer::run(common_config, indexer_config, Some(health)).await?;
 
     Ok(())
 }
@@ -278,13 +343,26 @@ async fn run_indexer(figment: Figment, verbose: bool) -> Result<(), Box<dyn std:
 async fn run_operator(figment: Figment, verbose: bool) -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_env_filter(if verbose {
-            "info,contra_indexer=debug"
+            "info,private_channel_indexer=debug"
         } else {
             "info"
         })
         .init();
 
+    let metrics_port = std::env::var("METRICS_PORT")
+        .ok()
+        .and_then(|p| p.parse::<u16>().ok())
+        .unwrap_or(9100);
+    private_channel_indexer::metrics::init();
+    let health = private_channel_metrics::HealthState::new(
+        private_channel_metrics::HealthConfig::operator(),
+    );
+    private_channel_metrics::start_metrics_server_with_health(metrics_port, health.clone());
+
     let common: CommonSection = figment.extract_inner("common")?;
+    private_channel_indexer::metrics::init_labels(private_channel_metrics::MetricLabel::as_label(
+        &common.program_type,
+    ));
     let storage_section: StorageSection = figment.extract_inner("storage")?;
     let operator: OperatorSection = figment.extract_inner("operator")?;
 
@@ -298,9 +376,10 @@ async fn run_operator(figment: Figment, verbose: bool) -> Result<(), Box<dyn std
     };
 
     // Initialize storage
-    let storage: Arc<contra_indexer::storage::Storage> = match storage_section.storage_type {
-        StorageType::Postgres => Arc::new(contra_indexer::storage::Storage::Postgres(
-            contra_indexer::storage::PostgresDb::new(&postgres_config).await?,
+    let storage: Arc<private_channel_indexer::storage::Storage> = match storage_section.storage_type
+    {
+        StorageType::Postgres => Arc::new(private_channel_indexer::storage::Storage::Postgres(
+            private_channel_indexer::storage::PostgresDb::new(&postgres_config).await?,
         )),
     };
     storage
@@ -315,7 +394,7 @@ async fn run_operator(figment: Figment, verbose: bool) -> Result<(), Box<dyn std
         })
         .transpose()?;
 
-    let common_config = ContraIndexerConfig {
+    let common_config = PrivateChannelIndexerConfig {
         program_type: common.program_type,
         storage_type: storage_section.storage_type,
         postgres: postgres_config,
@@ -333,12 +412,111 @@ async fn run_operator(figment: Figment, verbose: bool) -> Result<(), Box<dyn std
         rpc_commitment: operator
             .rpc_commitment
             .unwrap_or(CommitmentLevel::Confirmed),
+        alert_webhook_url: std::env::var("ALERT_WEBHOOK_URL").ok(),
+        reconciliation_interval: Duration::from_secs(operator.reconciliation_interval_secs),
+        reconciliation_tolerance_bps: operator.reconciliation_tolerance_bps,
+        reconciliation_webhook_url: operator.reconciliation_webhook_url,
+        feepayer_monitor_interval: Duration::from_secs(operator.feepayer_monitor_interval_secs),
+        confirmation_poll_interval_ms: operator.confirmation_poll_interval_ms,
     };
 
     // Validate signer configuration early (from environment variables)
     OperatorConfig::validate_signers().map_err(|e| format!("Signer configuration error: {}", e))?;
 
-    contra_indexer::operator::run(storage, common_config, operator_config).await?;
+    private_channel_indexer::operator::run(storage, common_config, operator_config, Some(health))
+        .await?;
+
+    Ok(())
+}
+
+async fn run_resync(
+    figment: Figment,
+    verbose: bool,
+    genesis_slot: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    tracing_subscriber::fmt()
+        .with_env_filter(if verbose {
+            "info,private_channel_indexer=debug"
+        } else {
+            "info"
+        })
+        .init();
+
+    let common: CommonSection = figment.extract_inner("common")?;
+    let storage: StorageSection = figment.extract_inner("storage")?;
+    let indexer: IndexerSection = figment.extract_inner("indexer")?;
+
+    // Get DATABASE_URL from environment
+    let database_url =
+        std::env::var("DATABASE_URL").map_err(|_| "DATABASE_URL environment variable required")?;
+
+    let postgres_config = PostgresConfig {
+        database_url,
+        max_connections: storage.max_connections,
+    };
+
+    // Initialize storage
+    let storage_instance: Arc<private_channel_indexer::storage::Storage> =
+        match storage.storage_type {
+            StorageType::Postgres => Arc::new(private_channel_indexer::storage::Storage::Postgres(
+                private_channel_indexer::storage::PostgresDb::new(&postgres_config).await?,
+            )),
+        };
+
+    // Initialize RPC poller
+    let rpc_url = indexer
+        .backfill
+        .rpc_url
+        .clone()
+        .unwrap_or_else(|| common.rpc_url.clone());
+    let rpc_encoding = indexer
+        .rpc_polling
+        .as_ref()
+        .and_then(|rpc| rpc.encoding)
+        .unwrap_or(UiTransactionEncoding::Json);
+    let rpc_commitment = indexer
+        .rpc_polling
+        .as_ref()
+        .and_then(|rpc| rpc.commitment)
+        .unwrap_or(CommitmentLevel::Finalized);
+
+    let rpc_poller = Arc::new(
+        private_channel_indexer::indexer::datasource::rpc_polling::rpc::RpcPoller::new(
+            rpc_url,
+            rpc_encoding,
+            rpc_commitment,
+        ),
+    );
+
+    // Parse escrow instance ID if provided
+    let escrow_instance_id = common
+        .escrow_instance_id
+        .map(|id_str| {
+            Pubkey::from_str(&id_str).map_err(|e| format!("Invalid escrow instance ID: {}", e))
+        })
+        .transpose()?;
+
+    // Build backfill config base
+    let backfill_config_base = BackfillConfig {
+        enabled: true,
+        exit_after_backfill: false,
+        rpc_url: indexer.backfill.rpc_url.unwrap_or(common.rpc_url.clone()),
+        batch_size: indexer.backfill.batch_size,
+        max_gap_slots: u64::MAX,
+        start_slot: Some(genesis_slot),
+    };
+
+    // Create ResyncService
+    let resync_service = private_channel_indexer::indexer::resync::ResyncService::new(
+        storage_instance,
+        rpc_poller,
+        common.program_type,
+        backfill_config_base,
+        escrow_instance_id,
+    );
+
+    // Run resync
+    resync_service.run(genesis_slot).await?;
 
     Ok(())
 }
